@@ -1,0 +1,9 @@
+node_modules/
+data/
+.DS_Store
+*.log
+.logs/
+.qoder/
+.env
+.env.*
+*.png
