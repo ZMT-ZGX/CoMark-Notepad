@@ -7,6 +7,7 @@
 - **多 Pad 标签** — 多个独立记事本，支持新建、切换、长按删除
 - **实时文本同步** — 多设备同时编辑，300ms 防抖广播
 - **文件共享** — 拖拽上传文件（Busboy 流式，100MB 上限），支持中文文件名
+- **文件格式转 Markdown** — 基于 markitdown-ts，支持 PDF/DOCX/PPTX/XLSX/HTML/CSV 等一键转换
 - **邀请制访问控制** — 三级权限体系（公开 / 受邀 / 管理员），HMAC Cookie 认证
 - **密码保护** — 可对单个 Pad 设置密码
 - **深色/浅色主题** — 跟随系统 / 手动切换，Apple 设计风格
@@ -24,7 +25,8 @@
 | 认证 | HMAC-SHA256 httpOnly Cookie |
 | 安全 | Helmet CSP + express-rate-limit |
 | 前端 | 原生 HTML/CSS/JS（零框架）|
-| 测试 | Node.js test runner（34 个集成测试）|
+| 文件转换 | markitdown-ts（进程内，零外部依赖）|
+| 测试 | Node.js test runner（43 个集成测试）|
 
 ## 快速开始
 
@@ -99,6 +101,7 @@ node server.js
 - `POST /api/upload` — multipart 上传
 - `GET /api/files/:id` — 下载
 - `DELETE /api/files/:id` — 删除
+- `POST /api/convert/:fileId` — 将已上传文件转为 Markdown
 
 ### WebSocket
 连接：`ws://host:port/?pad=<padId>&token=<sessionToken>`

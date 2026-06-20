@@ -9,6 +9,9 @@ const Busboy = require('busboy');
 const QRCode = require('qrcode');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { MarkItDown } = require('markitdown-ts');
+
+const markitdown = new MarkItDown();
 
 const PORT = Number(process.env.PORT ?? 8000);
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, 'data');
@@ -994,6 +997,61 @@ app.get('/api/files/:id', (req, res) => {
   res.setHeader('Content-Disposition', contentDisposition('attachment', file.originalName));
   res.type(file.mimeType || 'application/octet-stream');
   res.sendFile(filepath);
+});
+
+// --- MarkItDown Conversion (markitdown-ts, in-process) ---
+
+// Convert file to Markdown
+app.post('/api/convert/:fileId', requireOrigin, async (req, res) => {
+  const file = store.files.find(f => f.id === req.params.fileId);
+  if (!file) return res.status(404).json({ error: 'File not found' });
+  if (!canAccessFile(req.userId, file)) return res.status(403).json({ error: 'Access denied' });
+
+  const filepath = path.join(FILES_DIR, file.filename);
+  if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'File not found on disk' });
+
+  // Check if already converted
+  const mdOriginalName = `${file.originalName}.md`;
+  if (store.files.some(f => f.originalName === mdOriginalName && f.padId === file.padId)) {
+    return res.status(409).json({ error: 'Already converted' });
+  }
+
+  try {
+    const ext = path.extname(file.originalName).toLowerCase();
+    const buffer = fs.readFileSync(filepath);
+    const result = await markitdown.convertBuffer(buffer, { file_extension: ext });
+
+    if (!result || !result.markdown) {
+      return res.status(500).json({ error: 'Conversion returned empty result' });
+    }
+
+    const markdown = result.markdown;
+    const mdId = generateId();
+    const safeMdName = file.originalName.replace(/[^a-zA-Z0-9._-]/g, '_') + '.md';
+    const mdDiskName = `${mdId}_${safeMdName}`;
+    const mdDiskPath = path.join(FILES_DIR, mdDiskName);
+
+    fs.writeFileSync(mdDiskPath, markdown, 'utf8');
+
+    const mdFile = {
+      id: mdId,
+      filename: mdDiskName,
+      originalName: mdOriginalName,
+      size: Buffer.byteLength(markdown, 'utf8'),
+      mimeType: 'text/markdown',
+      createdAt: Date.now(),
+      ownerUserId: req.userId || null,
+      padId: file.padId,
+    };
+
+    store.files.unshift(mdFile);
+    saveStore();
+    broadcastToPad(mdFile.padId, { type: 'file-added', file: mdFile });
+    res.json(mdFile);
+  } catch (e) {
+    console.error('Convert error:', e.message);
+    res.status(500).json({ error: `Conversion failed: ${e.message}` });
+  }
 });
 
 // Delete single file

@@ -461,6 +461,88 @@ test('upload preserves chinese filenames', async () => {
   }
 });
 
+test('convert file to markdown', async () => {
+  const server = await startServer();
+  try {
+    // Register user
+    const regRes = await fetch(`${server.baseUrl}/api/auth/register`, { method: 'POST' });
+    const cookie = regRes.headers.get('set-cookie');
+
+    // Upload a CSV file
+    const formData = new FormData();
+    formData.append('padId', '1');
+    formData.append('file', new Blob(['name,age\nAlice,30\n'], { type: 'text/csv' }), 'data.csv');
+    const upload = await fetchJson(server.baseUrl, '/api/upload', {
+      method: 'POST',
+      headers: { Cookie: cookie },
+      body: formData,
+    });
+    assert.equal(upload.response.status, 200);
+
+    // Convert to markdown
+    const convert = await fetchJson(server.baseUrl, `/api/convert/${upload.body.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({}),
+    });
+    assert.equal(convert.response.status, 200);
+    assert.equal(convert.body.mimeType, 'text/markdown');
+    assert.match(convert.body.originalName, /\.md$/);
+
+    // Verify .md file exists on disk
+    const filesDir = path.join(server.dataDir, 'files');
+    const mdFiles = fs.readdirSync(filesDir).filter(f => f.endsWith('.md'));
+    assert.ok(mdFiles.length >= 1, 'Expected at least one .md file on disk');
+
+    // Duplicate convert → 409
+    const dup = await fetchJson(server.baseUrl, `/api/convert/${upload.body.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({}),
+    });
+    assert.equal(dup.response.status, 409);
+
+    // Nonexistent fileId → 404
+    const missing = await fetchJson(server.baseUrl, '/api/convert/nonexistent123', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({}),
+    });
+    assert.equal(missing.response.status, 404);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('convert requires file access', async () => {
+  const server = await startServer();
+  try {
+    // Register and upload a file with an owner (so it's not public)
+    const regRes = await fetch(`${server.baseUrl}/api/auth/register`, { method: 'POST' });
+    const cookie = regRes.headers.get('set-cookie');
+
+    const formData = new FormData();
+    formData.append('padId', '1');
+    formData.append('file', new Blob(['secret,data\n'], { type: 'text/csv' }), 'secret.csv');
+    const upload = await fetchJson(server.baseUrl, '/api/upload', {
+      method: 'POST',
+      headers: { Cookie: cookie },
+      body: formData,
+    });
+    assert.equal(upload.response.status, 200);
+
+    // Unauthenticated request (no cookie) → 403
+    const convert = await fetchJson(server.baseUrl, `/api/convert/${upload.body.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(convert.response.status, 403);
+  } finally {
+    await stopServer(server);
+  }
+});
+
 test('old single-pad store migrates to multi-pad', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collab-notepad-migrate-'));
   const storeFile = path.join(dataDir, 'store.json');

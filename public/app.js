@@ -801,6 +801,16 @@ function fileIcon(name) {
   return icons[ext] || '📁';
 }
 
+const CONVERTIBLE_EXTS = new Set([
+  'pdf', 'docx', 'doc', 'pptx', 'ppt', 'xlsx', 'xls', 'csv',
+  'html', 'htm', 'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp',
+  'mp3', 'wav', 'm4a', 'json', 'xml', 'yaml', 'yml', 'epub', 'zip',
+]);
+
+function isConvertible(name) {
+  return CONVERTIBLE_EXTS.has((name || '').toLowerCase().split('.').pop());
+}
+
 function createFileElement(file) {
   const el = document.createElement('div');
   el.className = 'file-item';
@@ -808,6 +818,7 @@ function createFileElement(file) {
   el.dataset.createdAt = String(file.createdAt || Date.now());
 
   const sizeLabel = formatSize(file.size);
+  const showConvert = isConvertible(file.originalName);
   el.innerHTML = `
     <div class="file-icon">${fileIcon(file.originalName)}</div>
     <div class="file-info">
@@ -815,6 +826,11 @@ function createFileElement(file) {
       <div class="file-meta" data-size="${escapeHtml(sizeLabel)}">${sizeLabel} · ${timeAgo(file.createdAt)}</div>
     </div>
     <div class="file-actions">
+      ${showConvert ? `<button class="file-action convert" title="Convert to Markdown">
+        <svg class="icon-doc" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <svg class="icon-spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+        <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>` : ''}
       <button class="file-action download" title="Download">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </button>
@@ -830,6 +846,35 @@ function createFileElement(file) {
     a.download = file.originalName;
     a.click();
   });
+
+  const convertBtn = el.querySelector('.convert');
+  if (convertBtn) {
+    convertBtn.addEventListener('click', async () => {
+      convertBtn.disabled = true;
+      convertBtn.title = 'Converting...';
+      convertBtn.classList.add('loading');
+      try {
+        const res = await fetch(`/api/convert/${file.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ _wsId: wsId }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Conversion failed');
+        addFileToList(data, true);
+        updateFilesEmpty();
+        showToast(`Converted: ${data.originalName}`);
+        convertBtn.classList.remove('loading');
+        convertBtn.classList.add('success');
+        convertBtn.title = 'Already converted';
+      } catch (e) {
+        showToast(e.message);
+        convertBtn.classList.remove('loading');
+        convertBtn.disabled = false;
+        convertBtn.title = 'Convert to Markdown';
+      }
+    });
+  }
 
   el.querySelector('.delete').addEventListener('click', async () => {
     try {

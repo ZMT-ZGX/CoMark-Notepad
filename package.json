@@ -4,7 +4,13 @@
   "description": "LAN real-time collaborative notepad with file sharing",
   "main": "server.js",
   "license": "MIT",
-  "keywords": ["notepad", "collaborative", "realtime", "websocket", "lan"],
+  "keywords": [
+    "notepad",
+    "collaborative",
+    "realtime",
+    "websocket",
+    "lan"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -17,6 +23,7 @@
     "express": "^5.0.0",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
+    "markitdown-ts": "^0.0.10",
     "qrcode": "^1.5.4",
     "ws": "^8.18.0"
   }

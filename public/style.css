@@ -453,6 +453,44 @@ main {
   color: var(--danger);
 }
 
+.file-action.convert {
+  color: var(--text-muted);
+}
+
+.file-action.convert:hover {
+  color: var(--primary);
+}
+
+/* Convert button icon states */
+.file-action.convert .icon-spinner,
+.file-action.convert .icon-check {
+  display: none;
+}
+.file-action.convert.loading .icon-doc,
+.file-action.convert.loading .icon-check {
+  display: none;
+}
+.file-action.convert.loading .icon-spinner {
+  display: inline;
+  animation: spin 0.8s linear infinite;
+}
+.file-action.convert.success .icon-doc,
+.file-action.convert.success .icon-spinner {
+  display: none;
+}
+.file-action.convert.success .icon-check {
+  display: inline;
+  color: var(--success, #34c759);
+}
+.file-action.convert.success {
+  color: var(--success, #34c759);
+  cursor: default;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* --- Drop Overlay --- */
 
 .drop-overlay {
