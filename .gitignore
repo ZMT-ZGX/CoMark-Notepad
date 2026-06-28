@@ -6,5 +6,6 @@ data/
 .qoder/
 .env
 .env.*
+!.env.example
 *.png
 converter/.venv/

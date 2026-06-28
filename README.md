@@ -7,7 +7,7 @@
 - **多 Pad 标签** — 多个独立记事本，支持新建、切换、长按删除
 - **实时文本同步** — 多设备同时编辑，300ms 防抖广播
 - **文件共享** — 拖拽上传文件（Busboy 流式，100MB 上限），支持中文文件名
-- **文件格式转 Markdown** — 基于 markitdown-ts，支持 PDF/DOCX/PPTX/XLSX/HTML/CSV 等一键转换
+- **文件格式转 Markdown** — 支持 PDF/DOCX/XLSX/PPTX/HTML/CSV/TXT/JSON/XML/YAML 及 JPG/PNG/GIF 图片元数据等一键转换
 - **邀请制访问控制** — 三级权限体系（公开 / 受邀 / 管理员），HMAC Cookie 认证
 - **密码保护** — 可对单个 Pad 设置密码
 - **深色/浅色主题** — 跟随系统 / 手动切换，Apple 设计风格
@@ -25,8 +25,8 @@
 | 认证 | HMAC-SHA256 httpOnly Cookie |
 | 安全 | Helmet CSP + express-rate-limit |
 | 前端 | 原生 HTML/CSS/JS（零框架）|
-| 文件转换 | markitdown-ts（进程内，零外部依赖）|
-| 测试 | Node.js test runner（43 个集成测试）|
+| 文件转换 | Worker Thread + mammoth/pdf-parse/read-excel-file/adm-zip/image-size/turndown |
+| 测试 | Node.js test runner（66 个集成测试）|
 
 ## 快速开始
 
@@ -53,6 +53,8 @@ node server.js
 | `NODE_ENV` | `development` | 设为 `production` 启用严格模式 |
 | `DATA_DIR` | `./data` | 数据目录 |
 | `FILE_TTL_HOURS` | `72` | 文件自动过期时间 |
+| `CONVERT_MAX_BYTES` | `10485760` | 转换 Markdown 的文件大小上限（10MB）|
+| `CONVERT_TIMEOUT_MS` | `60000` | 转换超时（ms）|
 
 ### 生产部署
 
@@ -63,6 +65,22 @@ ADMIN_TOKEN=<管理员令牌> \
 NODE_ENV=production \
 node server.js
 ```
+
+### Docker 部署
+
+```bash
+# 1. 复制环境变量模板并编辑
+cp .env.example .env
+# 生成 SESSION_SECRET: openssl rand -hex 32
+
+# 2. 启动
+docker compose up -d
+
+# 3. 查看日志
+docker compose logs -f
+```
+
+数据持久化在 `./data` 目录。
 
 ## 访问控制模型
 
@@ -84,16 +102,17 @@ node server.js
 - `POST /api/auth/register` — 自动注册
 - `POST /api/auth/verify` — 验证 Token
 - `GET /api/auth/me` — 当前用户信息
+- `POST /api/auth/logout` — 撤销当前会话
 
 ### 邀请
-- `POST /api/invite` — 生成邀请令牌
-- `POST /api/invite/redeem` — 兑换邀请
-- `DELETE /api/invite/:token` — 删除令牌
+- `POST /api/invitations` — 生成邀请令牌
+- `POST /api/invitations/redeem` — 兑换邀请
+- `DELETE /api/invitations/:token` — 删除令牌
 
 ### Pad
 - `GET /api/state` — 获取可访问的 Pads + 文件
 - `POST /api/pads` — 创建 Pad
-- `PUT /api/pads/:id` — 更新文本（广播）
+- `PUT /api/pads/:id/text` — 更新文本（广播）
 - `DELETE /api/pads/:id` — 删除 Pad
 - `PUT /api/pads/:id/password` — 设置密码
 
@@ -101,10 +120,11 @@ node server.js
 - `POST /api/upload` — multipart 上传
 - `GET /api/files/:id` — 下载
 - `DELETE /api/files/:id` — 删除
+- `GET /api/convert/capabilities` — 获取可转换格式、大小限制和功能开关
 - `POST /api/convert/:fileId` — 将已上传文件转为 Markdown
 
 ### WebSocket
-连接：`ws://host:port/?pad=<padId>&token=<sessionToken>`
+连接：`ws://host:port/?pad=<padId>`（session token 通过 Cookie 自动携带）
 
 消息类型：`text-update` / `file-added` / `file-deleted` / `pad-created` / `pad-deleted` / `online-count`
 
@@ -118,15 +138,20 @@ npm test
 
 ```
 collab-notepad/
-├── server.js         # Express + WebSocket + Auth + API
+├── server.js              # Express + WebSocket + Auth + API
+├── convert-worker.js      # Worker Thread 文件转换引擎
 ├── public/
-│   ├── index.html    # 多标签 + 邀请模态框
-│   ├── app.js        # 文本/文件/主题/邀请/认证
-│   └── style.css     # Apple 设计语言 CSS + 移动端
+│   ├── index.html         # 多标签 + 邀请模态框
+│   ├── app.js             # 文本/文件/主题/邀请/认证
+│   └── style.css          # Apple 设计语言 CSS + 移动端
 ├── tests/
-│   ├── smoke.test.js     # 核心功能测试
-│   └── identity.test.js  # 认证/安全测试
-└── data/             # 运行时自动生成
+│   ├── smoke.test.js      # 核心功能测试
+│   ├── identity.test.js   # 认证/安全测试
+│   └── convert.test.js    # 转换引擎测试
+├── Dockerfile             # 多阶段生产镜像
+├── docker-compose.yml
+├── .env.example           # 环境变量模板
+└── data/                  # 运行时自动生成
 ```
 
 ## License
