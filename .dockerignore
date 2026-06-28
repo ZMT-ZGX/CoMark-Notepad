@@ -1,0 +1,16 @@
+node_modules
+data
+.git
+.gitignore
+.env
+.env.*
+*.md
+*.log
+.logs
+.qoder
+tests
+converter
+.DS_Store
+*.png
+docker-compose.yml
+Dockerfile

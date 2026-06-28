@@ -1,0 +1,37 @@
+services:
+  collab-notepad:
+    build: .
+    container_name: collab-notepad
+    restart: unless-stopped
+
+    ports:
+      - "${PORT:-8000}:8000"
+
+    volumes:
+      # Persistent data (store.json + uploaded files)
+      - ./data:/app/data
+
+    environment:
+      # Required in production
+      - SESSION_SECRET=${SESSION_SECRET:?Set SESSION_SECRET in .env (64+ char random string)}
+      # Optional
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - SESSION_TOKEN_TTL_DAYS=${SESSION_TOKEN_TTL_DAYS:-30}
+      - FILE_TTL_HOURS=${FILE_TTL_HOURS:-72}
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # NOTE: deploy.resources.limits only applies in Swarm mode or with
+    # `docker compose --compatibility`. For standard compose, use cgroups
+    # via mem_limit/cpus (compose v2) or manage resources externally.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
