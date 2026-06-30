@@ -1131,7 +1131,10 @@ app.post('/api/upload', uploadLimiter, requireOrigin, (req, res) => {
       writeStream.on('error', reject);
       file.on('error', reject);
     });
-    fileWritePromise.catch(() => {}); // Prevent unhandled rejection on busboy errors
+    // Guard: on limit/abort paths the finish handler returns early without
+    // awaiting fileWritePromise, so attach a no-op catch to prevent
+    // unhandledRejection (Node 15+ terminates the process by default).
+    fileWritePromise.catch(() => {});
 
     file.on('limit', () => {
       fileLimitReached = true;
@@ -1308,6 +1311,7 @@ app.post('/api/convert/:fileId', convertLimiter, requireOrigin, async (req, res)
   }
   activeConverts++; // increment immediately so the check is atomic
   let mdDiskPath = null;
+  let lockAcquired = false;
   try {
     const file = store.files.find(f => f.id === req.params.fileId);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -1343,6 +1347,7 @@ app.post('/api/convert/:fileId', convertLimiter, requireOrigin, async (req, res)
       return res.status(409).json({ error: 'Conversion already in progress' });
     }
     convertingFiles.add(req.params.fileId);
+    lockAcquired = true;
 
     const ext = path.extname(file.originalName).toLowerCase();
     let markdown;
@@ -1412,7 +1417,7 @@ app.post('/api/convert/:fileId', convertLimiter, requireOrigin, async (req, res)
       res.status(500).json({ error: 'Conversion failed' });
     }
   } finally {
-    convertingFiles.delete(req.params.fileId);
+    if (lockAcquired) convertingFiles.delete(req.params.fileId);
     activeConverts--;
   }
 });
@@ -1526,7 +1531,8 @@ function broadcastPadOnlineCount(padId) {
 function broadcastToAll(data) {
   const msg = JSON.stringify(data);
   for (const [, padSet] of padClients) {
-    for (const ws of padSet) {
+    // Snapshot to avoid removeClient mutating the set mid-iteration
+    for (const ws of Array.from(padSet)) {
       if (ws.readyState !== WebSocket.OPEN) continue;
       try {
         ws.send(msg);
@@ -1573,7 +1579,11 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // Origin check: prevent cross-origin WebSocket connections
+  // Origin check: prevent cross-origin WebSocket connections.
+  // Unlike requireOrigin (HTTP), WebSocket handshakes from browsers always
+  // include an Origin header, so a missing Origin here indicates a non-browser
+  // client — allow it (same rationale as isAllowedOrigin returning true for
+  // missing Origin on GET requests).
   const origin = req.headers.origin;
   if (!isAllowedOrigin(origin)) {
     ws.close(4400, 'Invalid origin');
@@ -1631,7 +1641,8 @@ function broadcastToPad(padId, data, excludeWsId) {
   const padSet = padClients.get(padId);
   if (!padSet || padSet.size === 0) return;
   const msg = JSON.stringify(data);
-  for (const ws of padSet) {
+  // Snapshot to avoid removeClient mutating the set mid-iteration
+  for (const ws of Array.from(padSet)) {
     if (excludeWsId && ws.clientId === excludeWsId) continue;
     if (ws.readyState !== WebSocket.OPEN) continue;
     try {
@@ -1644,7 +1655,8 @@ function broadcastToPad(padId, data, excludeWsId) {
 
 const heartbeatTimer = setInterval(() => {
   for (const [, padSet] of padClients) {
-    for (const ws of padSet) {
+    // Snapshot to avoid removeClient mutating the set mid-iteration
+    for (const ws of Array.from(padSet)) {
       if (ws.readyState !== WebSocket.OPEN) {
         removeClient(ws);
         continue;
