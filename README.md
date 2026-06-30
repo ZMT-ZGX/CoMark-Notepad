@@ -1,6 +1,6 @@
 # CoMark-Notepad
 
-局域网实时协作记事本 + 文件共享 + 文件转.md。一台电脑启动服务，同 WiFi 下的设备打开浏览器即可实时同步文字和文件。
+(CoMark means "Collaborative + Markdown")局域网实时协作记事本 + 文件共享 + 文件转.md。一台电脑启动服务，同 WiFi 下的设备打开浏览器即可实时同步文字和文件。
 
 ## 功能
 
