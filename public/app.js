@@ -801,11 +801,13 @@ function sendText() {
 async function sendTextNow() {
   sendTimeout = null;
   const requestId = ++lastTextRequestId;
-  const token = getPadToken(currentPadId);
+  // Snapshot pad context at send time to avoid race with pad switching during debounce
+  const padId = currentPadId;
+  const token = getPadToken(padId);
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['X-Pad-Token'] = token;
   try {
-    const res = await fetch(`/api/pads/${currentPadId}/text`, {
+    const res = await fetch(`/api/pads/${padId}/text`, {
       method: 'PUT',
       headers,
       body: JSON.stringify({ text: textarea.value, _wsId: wsId }),
