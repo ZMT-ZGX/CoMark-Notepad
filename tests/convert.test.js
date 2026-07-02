@@ -327,7 +327,7 @@ test('capabilities API returns conversion info', async () => {
   const os = require('os');
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'convert-cap-'));
   const server = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['server.js'], {
+    const child = spawn(process.execPath, [require.resolve('tsx/cli'), 'src/server.ts'], {
       cwd: path.join(__dirname, '..'),
       env: { ...process.env, PORT: '0', DATA_DIR: dataDir },
       stdio: ['ignore', 'pipe', 'pipe'],

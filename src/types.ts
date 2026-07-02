@@ -1,0 +1,268 @@
+/**
+ * Core type definitions for CoMark-Notepad.
+ *
+ * These types describe every entity persisted in the JSON store and every
+ * message exchanged over WebSocket.  Zod schemas in `src/validators/`
+ * should stay aligned with the shapes defined here.
+ */
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import type { Request } from 'express';
+import type { WebSocket } from 'ws';
+
+// ── Entities ────────────────────────────────────────────────────────
+
+export interface Pad {
+  id: number;
+  text: string;
+  textVersion: number;
+  password: string | null;
+  createdAt: number;
+  ownerUserId: string | null;
+  creatorCode: string | null;
+}
+
+export interface FileInfo {
+  id: string;
+  filename: string;
+  originalName: string;
+  size: number;
+  mimeType: string;
+  createdAt: number;
+  ownerUserId: string | null;
+  padId: number;
+}
+
+export interface User {
+  code: string;
+  createdAt: number;
+}
+
+export interface Invitation {
+  token: string;
+  creatorCode: string;
+  maxUses: number;
+  useCount: number;
+  expiresAt: number | null;
+  createdAt: number;
+}
+
+export interface AccessGrant {
+  inviteToken: string;
+  grantorCode: string;
+  granteeCode: string;
+  grantedAt: number;
+}
+
+// ── Store (JSON persistence) ────────────────────────────────────────
+
+export interface StoreState {
+  pads: Pad[];
+  files: FileInfo[];
+  users: User[];
+  inviteTokens: Invitation[];
+  accessGrants: AccessGrant[];
+  revokedTokens: Record<string, number>;
+}
+
+// ── WebSocket messages ──────────────────────────────────────────────
+
+export interface WsTextUpdate {
+  type: 'text-update';
+  padId: number;
+  text: string;
+  textVersion: number;
+}
+
+export interface WsFileAdded {
+  type: 'file-added';
+  file: FileInfo;
+}
+
+export interface WsFileDeleted {
+  type: 'file-deleted';
+  fileId: string;
+}
+
+export interface WsPadCreated {
+  type: 'pad-created';
+  pad: PadMeta;
+}
+
+export interface WsPadDeleted {
+  type: 'pad-deleted';
+  padId: number;
+}
+
+export interface WsPadUpdated {
+  type: 'pad-updated';
+  pad: PadMeta;
+}
+
+export interface WsOnlineCount {
+  type: 'online-count';
+  count: number;
+}
+
+export interface WsHello {
+  type: 'hello';
+  wsId: string;
+  padId: number;
+  userId: string | null;
+}
+
+export type WsMessage =
+  | WsTextUpdate
+  | WsFileAdded
+  | WsFileDeleted
+  | WsPadCreated
+  | WsPadDeleted
+  | WsPadUpdated
+  | WsOnlineCount
+  | WsHello;
+
+export type PadMeta = Pick<Pad, 'id' | 'createdAt'> & {
+  hasPassword: boolean;
+  ownerUserId: string | null;
+};
+
+// ── Express extensions ──────────────────────────────────────────────
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      userId?: string | null;
+    }
+  }
+}
+
+// ── WebSocket extensions ────────────────────────────────────────────
+
+export interface CoMarkWebSocket extends WebSocket {
+  clientId: string;
+  padId: number;
+  userId: string | null;
+  ipAddress: string;
+  isAlive: boolean;
+}
+
+// ── Config ──────────────────────────────────────────────────────────
+
+export interface AppConfig {
+  PORT: number;
+  DATA_DIR: string;
+  FILES_DIR: string;
+  STORE_FILE: string;
+  MAX_FILE_BYTES: number;
+  JSON_BODY_LIMIT: number;
+  HEARTBEAT_INTERVAL_MS: number;
+  UNLOCK_TOKEN_TTL_MS: number;
+  MAX_PADS: number;
+  FILE_TTL_HOURS: number;
+  FILE_TTL_CHECK_INTERVAL_MS: number;
+  CONVERT_MAX_BYTES: number;
+  CONVERT_TIMEOUT_MS: number;
+  MAX_PASSWORD_LENGTH: number;
+  ADMIN_TOKEN: string | null;
+  MAX_WS_CONNECTIONS: number;
+  MAX_WS_CONNECTIONS_PER_IP: number;
+  CONVERTIBLE_EXTS: string[];
+  CONVERT_FEATURES: Record<string, boolean>;
+  isProduction: boolean;
+  SESSION_SECRET: string;
+  SESSION_TOKEN_TTL_DAYS: number;
+  PUBLIC_ORIGIN: string;
+  cookieFlags: string;
+}
+
+// ── Data Store interface ────────────────────────────────────────────
+
+export interface DataStore {
+  rawStore: IJSONStore;
+  FILES_DIR: string;
+
+  // Pad
+  findPadById(id: number): Pad | undefined;
+  findAllPads(): Pad[];
+  padExists(id: number): boolean;
+  createPad(pad: Partial<Pad> & { ownerUserId?: string | null; creatorCode?: string | null }): Pad;
+  updatePadText(id: number, text: string): Pad | null;
+  updatePadPassword(id: number, hash: string | null): Pad | null;
+  removePad(id: number): void;
+
+  // File
+  findFileById(id: string): FileInfo | undefined;
+  findAllFiles(): FileInfo[];
+  createFile(info: FileInfo): FileInfo;
+  removeFile(id: string): void;
+  removeFilesByPadId(padId: number): void;
+  removeFilesMany(ids: string[]): void;
+  removeExpiredFiles(ttlMs: number): FileInfo[];
+
+  // User
+  userExists(code: string): boolean;
+  createUser(user: User): User;
+
+  // Invitation
+  createInvitation(invite: Invitation): Invitation;
+  findInvitationByToken(token: string): Invitation | undefined;
+  removeInvitation(token: string): { ok: boolean; revokedGrants: number } | false;
+  hasAccessGrant(grantor: string, grantee: string): boolean;
+  addAccessGrant(grant: AccessGrant): void;
+  listInvitationsByCreator(code: string): Invitation[];
+  listGrantsByGrantee(code: string): AccessGrant[];
+
+  // Persistence
+  save(): void;
+  flush(): Promise<void>;
+  flushSync(): void;
+}
+
+// ── JSON Store ──────────────────────────────────────────────────────
+
+export interface IJSONStore {
+  dataDir: string;
+  data: StoreState | null;
+  dirty: boolean;
+  saveTimer: ReturnType<typeof setTimeout> | null;
+  writeLock: boolean;
+  load(): Promise<void>;
+  getStore(): StoreState;
+  save(): void;
+  flush(): Promise<void>;
+  flushSync(): void;
+}
+
+// ── Broadcast ───────────────────────────────────────────────────────
+
+export interface Broadcast {
+  toPad(padId: number, data: WsMessage, excludeWsId?: string): void;
+  toAll(data: WsMessage): void;
+}
+
+// ── Services ────────────────────────────────────────────────────────
+
+export interface Services {
+  db: typeof import('./db');
+  padService: typeof import('./services/padService');
+  fileService: typeof import('./services/fileService');
+  inviteService: typeof import('./services/inviteService');
+  convertService: typeof import('./services/convertService');
+}
+
+// ── Unlock token entry ──────────────────────────────────────────────
+
+export interface UnlockTokenEntry {
+  padId: number;
+  expires: number;
+}
+
+// ── Convert capabilities ────────────────────────────────────────────
+
+export interface ConvertCapabilities {
+  extensions: string[];
+  maxBytes: number;
+  timeoutMs: number;
+  features: Record<string, boolean>;
+}

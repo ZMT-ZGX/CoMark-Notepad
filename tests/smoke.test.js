@@ -13,7 +13,7 @@ function startServer(extraEnv = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comark-notepad-'));
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['src/server.js'], {
+    const child = spawn(process.execPath, [require.resolve('tsx/cli'), 'src/server.ts'], {
       cwd: PROJECT_DIR,
       env: { ...process.env, PORT: '0', DATA_DIR: dataDir, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -611,7 +611,7 @@ test('old single-pad store migrates to multi-pad', async () => {
     files: [],
   }));
 
-  const child = spawn(process.execPath, ['src/server.js'], {
+  const child = spawn(process.execPath, [require.resolve('tsx/cli'), 'src/server.ts'], {
     cwd: PROJECT_DIR,
     env: { ...process.env, PORT: '0', DATA_DIR: dataDir },
     stdio: ['ignore', 'pipe', 'pipe'],

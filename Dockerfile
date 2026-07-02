@@ -1,9 +1,19 @@
-# ---- Stage 1: Install dependencies ----
-FROM node:20-alpine AS deps
+# ---- Stage 1: Build TypeScript ----
+FROM node:20-alpine AS builder
 
 WORKDIR /app
+
+# Install build tools for native modules (better-sqlite3)
+RUN apk add --no-cache python3 make g++
+
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci
+COPY tsconfig.json ./
+COPY src/ ./src/
+RUN npx tsc
+
+# Remove devDependencies to get a clean production node_modules
+RUN npm prune --omit=dev
 
 # ---- Stage 2: Production image ----
 FROM node:20-alpine AS runner
@@ -17,11 +27,13 @@ RUN addgroup -g 1001 -S appgroup && \
 
 WORKDIR /app
 
-# Copy node_modules from deps stage
-COPY --from=deps /app/node_modules ./node_modules
+# Copy production node_modules (with pre-built native modules) from builder
+COPY --from=builder /app/node_modules ./node_modules
 
-# Copy application code
-COPY src/ ./src/
+# Copy compiled output from builder stage
+COPY --from=builder /app/dist ./dist
+
+# Copy non-compiled assets
 COPY convert-worker.js ./
 COPY public/ ./public/
 
@@ -43,5 +55,5 @@ ENV NODE_ENV=production \
     PORT=8000 \
     DATA_DIR=/app/data
 
-# Start
-CMD ["node", "src/server.js"]
+# Start compiled server
+CMD ["node", "dist/server.js"]

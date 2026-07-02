@@ -18,15 +18,17 @@
 
 | 层 | 选型 |
 |---|------|
-| 后端 | Node.js + Express 5 |
+| 后端 | Node.js + Express 5 (TypeScript) |
 | 实时通信 | WebSocket (ws) + 30s 心跳 |
-| 持久化 | JSON 文件（200ms 防抖写入）|
+| 持久化 | SQLite (better-sqlite3, WAL 模式) |
+| 运行时校验 | Zod v4 |
 | 文件存储 | Busboy multipart 流式上传 |
 | 认证 | HMAC-SHA256 httpOnly Cookie |
 | 安全 | Helmet CSP + express-rate-limit |
-| 前端 | 原生 HTML/CSS/JS（零框架）|
+| 前端 | 原生 HTML/CSS/JS（零框架，ES Modules）|
 | 文件转换 | Worker Thread + mammoth/pdf-parse/read-excel-file/adm-zip/image-size/turndown |
 | 测试 | Node.js test runner（66 个集成测试）|
+| 工程化 | ESLint + Prettier + simple-git-hooks + GitHub Actions CI |
 
 ## 快速开始
 
@@ -34,7 +36,7 @@
 git clone <repo-url>
 cd CoMark-Notepad
 npm install
-node server.js
+npm run dev
 ```
 
 启动后访问：
@@ -63,7 +65,7 @@ SESSION_SECRET=<64+字符随机密钥> \
 PUBLIC_ORIGIN=https://yourdomain.com \
 ADMIN_TOKEN=<管理员令牌> \
 NODE_ENV=production \
-node server.js
+npm start
 ```
 
 ### Docker 部署
@@ -80,7 +82,9 @@ docker compose up -d
 docker compose logs -f
 ```
 
-数据持久化在 `./data` 目录。
+数据持久化在 `./data` 目录（SQLite 数据库 + 上传文件）。
+
+> ⚠️ **SQLite 回滚警告**：从 SQLite 回滚到 JSON 存储将导致自迁移后的所有增量数据（新 Pad、新文件、新邀请）丢失。此操作仅在灾难恢复时使用，日常请勿执行。迁移前会自动备份 `store.json.backup.<timestamp>`。
 
 ## 访问控制模型
 
@@ -138,21 +142,56 @@ npm test
 
 ```
 CoMark-Notepad/
-├── server.js              # Express + WebSocket + Auth + API
-├── convert-worker.js      # Worker Thread 文件转换引擎
+├── src/
+│   ├── server.ts          # 启动入口
+│   ├── app.ts             # Express 应用配置
+│   ├── config.ts          # 环境变量 & 常量
+│   ├── types.ts           # 核心类型定义
+│   ├── auth/              # 认证 (session/password)
+│   ├── middlewares/        # 中间件 (auth/security/validate/errorHandler)
+│   ├── routes/            # API 路由 (auth/pads/files/invitations/convert/health)
+│   ├── services/          # 业务逻辑 (padService/fileService/inviteService/convertService)
+│   ├── db/                # 数据层 (SQLite + pads/files/users/invitations)
+│   ├── store/             # DataStore facade
+│   ├── validators/        # Zod Schema
+│   ├── utils/             # 工具 (crypto/auth/errors/file/logger)
+│   └── ws/                # WebSocket (connections/broadcast)
 ├── public/
-│   ├── index.html         # 多标签 + 邀请模态框
-│   ├── app.js             # 文本/文件/主题/邀请/认证
-│   └── style.css          # Apple 设计语言 CSS + 移动端
-├── tests/
-│   ├── smoke.test.js      # 核心功能测试
-│   ├── identity.test.js   # 认证/安全测试
-│   └── convert.test.js    # 转换引擎测试
+│   ├── index.html
+│   ├── js/                # ES Modules (core/server/ws/pads/files/theme/invitation/modals)
+│   └── style.css
+├── convert-worker.js      # Worker Thread 文件转换引擎
+├── tests/                 # 集成测试 (66 个)
 ├── Dockerfile             # 多阶段生产镜像
 ├── docker-compose.yml
 ├── .env.example           # 环境变量模板
-└── data/                  # 运行时自动生成
+└── data/                  # 运行时自动生成 (SQLite + 上传文件)
 ```
+
+## Changelog
+
+### v1.0.2 (2026-06-27)
+
+**六阶段全面重构 + 代码审查修复**
+
+- **Phase 1 — 服务端模块化拆分**: `server.js` 单文件 → `src/` 下 43 个 TypeScript 模块（routes/middlewares/ws/utils/auth/store/services/validators/db）
+- **Phase 2 — 数据层抽象 + Zod 运行时校验**: DataStore facade 统一 26 个方法接口；9 个 Zod Schema 覆盖所有写操作路由；`z.infer<>` 自动推导 TS 类型
+- **Phase 3 — 前端模块化**: `public/app.js` → `public/js/` 下 8 个 ES Module 文件（core/server/ws/pads/files/theme/invitation/modals）
+- **Phase 4 — TypeScript 渐进式迁移**: 全部 `.js` → `.ts`；`strict: true`；Source Map 可用；构建产物 768KB
+- **Phase 5 — SQLite 替换 JSON 存储**: `better-sqlite3` WAL 模式；外键约束 + CASCADE 删除；9 个索引；JSON→SQLite 幂等迁移 + 自动备份
+- **Phase 6 — 工程化与质量**: ESLint + Prettier + simple-git-hooks + GitHub Actions CI；Docker 多阶段构建优化（非 root + 无构建工具）
+- **安全复核**: HMAC-SHA256 / scrypt / timingSafeEqual / SameSite=Strict / Rate Limit / Origin 校验全部保留
+- **代码审查修复**: CI YAML 去重、`||` → `??` mapper 修复、access_grants 外键约束、errorHandler null guard、IJSONStore 接口对齐、Pad ID AUTOINCREMENT、回滚免责声明
+
+### v1.0.1 (2026-06-26)
+
+- UTL 分层重构（Utils → Types → Logic）
+- 前端移动端适配 + 双行 Header
+- 修复上传超限未处理异常、convert 锁竞态、debounce 文本同步竞态
+
+### v1.0.0
+
+- 初始发布：多 Pad 标签 + 实时同步 + 文件共享 + 邀请制访问控制 + 密码保护 + 主题切换 + 二维码连接
 
 ## License
 

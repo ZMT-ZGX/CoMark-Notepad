@@ -1,8 +1,8 @@
 {
   "name": "comark-notepad",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "LAN real-time collaborative notepad with file sharing",
-  "main": "src/server.js",
+  "main": "dist/server.js",
   "license": "MIT",
   "keywords": [
     "notepad",
@@ -15,12 +15,30 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "test": "node --test tests/*.test.js"
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "build": "tsc",
+    "test": "node --import tsx --test tests/*.test.js",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write 'src/**/*.ts'",
+    "format:check": "prettier --check 'src/**/*.ts'",
+    "typecheck": "tsc --noEmit",
+    "prepare": "simple-git-hooks"
+  },
+  "lint-staged": {
+    "src/**/*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npx lint-staged"
   },
   "dependencies": {
     "@joplin/turndown-plugin-gfm": "^1.0.67",
     "adm-zip": "^0.5.17",
+    "better-sqlite3": "^12.11.1",
     "busboy": "^1.6.0",
     "express": "^5.0.0",
     "express-rate-limit": "^8.5.2",
@@ -33,6 +51,22 @@
     "qrcode": "^1.5.4",
     "read-excel-file": "^9.2.0",
     "turndown": "^7.2.4",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.0",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.62.1",
+    "@typescript-eslint/parser": "^8.62.1",
+    "eslint": "^10.6.0",
+    "eslint-config-prettier": "^10.1.8",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.9.4",
+    "simple-git-hooks": "^2.13.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
   }
 }

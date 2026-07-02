@@ -32,7 +32,7 @@ const PROJECT_DIR = path.resolve(__dirname, '..');
 function startServer(extraEnv = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collab-identity-'));
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['src/server.js'], {
+    const child = spawn(process.execPath, [require.resolve('tsx/cli'), 'src/server.ts'], {
       cwd: PROJECT_DIR,
       env: { ...process.env, PORT: '0', DATA_DIR: dataDir, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],

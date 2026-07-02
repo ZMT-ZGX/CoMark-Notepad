@@ -1,5 +1,8 @@
 node_modules/
+dist/
 data/
+*.db
+db.bak.pre-phase5/
 .DS_Store
 *.log
 .logs/
