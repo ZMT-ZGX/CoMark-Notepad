@@ -2,7 +2,7 @@
 
 const { parentPort, workerData } = require('worker_threads');
 const mammoth = require('mammoth');
-const { PDFParse } = require('pdf-parse');
+const pdfParse = require('pdf-parse');
 const TurndownService = require('turndown');
 const { gfm } = require('@joplin/turndown-plugin-gfm');
 const readExcelFile = require('read-excel-file/node');
@@ -383,13 +383,8 @@ function isTitleShape(shapeXml) {
 // ── Individual converters ───────────────────────────────────────────────────
 
 async function convertPdf(buffer) {
-  const parser = new PDFParse({ data: Buffer.from(buffer) });
-  try {
-    const result = await parser.getText();
-    return result.text || '';
-  } finally {
-    await parser.destroy();
-  }
+  const result = await pdfParse(Buffer.from(buffer));
+  return result.text || '';
 }
 
 async function convertDocx(buffer) {
@@ -398,8 +393,8 @@ async function convertDocx(buffer) {
 }
 
 async function convertXlsx(buffer) {
-  const sheets = await readExcelFile(Buffer.from(buffer));
-  return sheets
+  const sheetsResult = await readExcelFile(Buffer.from(buffer), { sheet: 'all' });
+  return sheetsResult
     .map(({ sheet, data }) => {
       const table = rowsToMarkdownTable(data || []);
       return table ? `## ${sheet}\n\n${table}` : '';

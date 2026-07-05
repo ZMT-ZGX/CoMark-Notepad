@@ -7,6 +7,9 @@ const users = require('./users');
 const invitations = require('./invitations');
 const migrate = require('./migrate');
 
+// FTS5 exports surfaced on the db namespace for the /api/search route
+const { searchPads, searchSnippet } = pads;
+
 module.exports = {
   store,
   pads,
@@ -15,4 +18,6 @@ module.exports = {
   invitations,
   migrate,
   FILES_DIR,
+  searchPads,
+  searchSnippet,
 };

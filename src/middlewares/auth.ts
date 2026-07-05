@@ -37,8 +37,10 @@ function requireAuth(req, res, next) {
 
 function isAdmin(req) {
   if (!ADMIN_TOKEN) return false;
-  const provided = req.headers['x-admin-token'] || '';
-  if (provided.length !== ADMIN_TOKEN.length) return false;
+  let provided = req.headers['x-admin-token'] || '';
+  if (Array.isArray(provided)) provided = provided[0] || '';
+  if (!provided) return false;
+  if (Buffer.byteLength(provided, 'utf8') !== Buffer.byteLength(ADMIN_TOKEN, 'utf8')) return false;
   return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(ADMIN_TOKEN));
 }
 

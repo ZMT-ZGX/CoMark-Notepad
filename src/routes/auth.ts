@@ -22,7 +22,15 @@ function createRouter(db) {
   const router = express.Router();
 
   router.post('/register', registerLimiter, checkOrigin, validate(RegisterSchema), (req, res) => {
-    const code = generateUserCode();
+    let code;
+    let attempts = 0;
+    do {
+      code = generateUserCode();
+      attempts++;
+    } while (db.users.exists(code) && attempts < 10);
+    if (db.users.exists(code)) {
+      return res.status(500).json({ error: 'Failed to generate unique user code' });
+    }
     db.users.create({ code, createdAt: Date.now() });
 
     const requested = req.body.expiresInDays;

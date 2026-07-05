@@ -74,13 +74,23 @@ export interface WsTextUpdate {
   textVersion: number;
 }
 
+export interface WsPatch {
+  type: 'patch';
+  padId: number;
+  data: string;
+  textVersion: number;
+  senderId: string | null;
+}
+
 export interface WsFileAdded {
   type: 'file-added';
+  padId: number;
   file: FileInfo;
 }
 
 export interface WsFileDeleted {
   type: 'file-deleted';
+  padId: number;
   fileId: string;
 }
 
@@ -113,6 +123,7 @@ export interface WsHello {
 
 export type WsMessage =
   | WsTextUpdate
+  | WsPatch
   | WsFileAdded
   | WsFileDeleted
   | WsPadCreated
@@ -243,12 +254,18 @@ export interface Broadcast {
 
 // ── Services ────────────────────────────────────────────────────────
 
+// Compile-time type imports of service classes (no runtime circular dep)
+import type PadService = require('./services/padService');
+import type FileService = require('./services/fileService');
+import type InviteService = require('./services/inviteService');
+import type ConvertService = require('./services/convertService');
+
 export interface Services {
   db: typeof import('./db');
-  padService: typeof import('./services/padService');
-  fileService: typeof import('./services/fileService');
-  inviteService: typeof import('./services/inviteService');
-  convertService: typeof import('./services/convertService');
+  padService: PadService;
+  fileService: FileService;
+  inviteService: InviteService;
+  convertService: ConvertService;
 }
 
 // ── Unlock token entry ──────────────────────────────────────────────

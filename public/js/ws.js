@@ -1,10 +1,23 @@
-import { state, $, showToast, getPadToken, upsertLocalFile, removeLocalFile, escapeHtml } from './core.js';
-import { fetchMe, registerUser, updatePadText } from './server.js';
-import { refreshPads, loadPadContent, renderPadTabs, updateLockButton } from './pads.js';
-import { addFileToList, removeFileFromList, updateFilesEmpty, updateTextStats } from './files.js';
-import { showUnlockModal } from './modals.js';
+/**
+ * CoMark-Notepad — WebSocket module
+ *
+ * Manages the WebSocket connection lifecycle, message dispatch,
+ * automatic reconnection, and inactivity-based heartbeat.
+ *
+ * Other UI features that were historically in this file (preview, QR,
+ * export, beforeunload) have been extracted to their own modules in
+ * public/js/. Callers import them from their dedicated modules directly.
+ */
 
-// --- Identity ---
+import { state, $, showToast, getPadToken, upsertLocalFile, removeLocalFile } from './core.js';
+import { refreshPads, loadPadContent } from './pads.js';
+import { addFileToList, removeFileFromList, updateFilesEmpty } from './files.js';
+import { showUnlockModal } from './modals.js';
+import { applyRemoteText, applyRemotePatch, applyTextState, flushPatchQueue, showOfflineBanner, hideOfflineBanner } from './text-sync.js';
+
+// --- Identity (kept here because it touches state init + pads + ws) ---
+
+import { fetchMe, registerUser } from './server.js';
 
 export async function initIdentity() {
   try { state.userCode = sessionStorage.getItem('userCode') || null; } catch {}
@@ -45,72 +58,25 @@ function copyUserCode() {
   );
 }
 
-// --- Text Sync ---
-
-const textarea = () => $('#text-input');
-
-export function applyTextState(text, version) {
-  text = text || '';
-  const ta = textarea();
-  const start = ta.selectionStart;
-  const end = ta.selectionEnd;
-  ta.value = text;
-  ta.setSelectionRange(Math.min(start, text.length), Math.min(end, text.length));
-  state.textVersion = Math.max(state.textVersion, version || 0);
-  updateTextStats();
+export function initIdentityBindings() {
+  $('#copy-user-code-btn').addEventListener('click', copyUserCode);
 }
 
-function queueRemoteText(text, version) {
-  if (version <= state.textVersion) return;
-  state.pendingRemoteState = { text, textVersion: version };
-}
-
-function applyPendingRemoteText() {
-  if (!state.pendingRemoteState) return;
-  if (state.pendingRemoteState.textVersion <= state.textVersion) {
-    state.pendingRemoteState = null;
-    return;
+export async function loadConvertCapabilitiesUI() {
+  const { loadConvertCapabilities } = await import('./server.js');
+  const { refreshConvertibleExts } = await import('./core.js');
+  const data = await loadConvertCapabilities();
+  if (!data) return;
+  if (Array.isArray(data.extensions)) {
+    state.convertCapabilities.extensions = data.extensions;
+    refreshConvertibleExts();
   }
-  applyTextState(state.pendingRemoteState.text, state.pendingRemoteState.textVersion);
-  state.pendingRemoteState = null;
+  if (typeof data.maxBytes === 'number') state.convertCapabilities.maxBytes = data.maxBytes;
+  if (typeof data.timeoutMs === 'number') state.convertCapabilities.timeoutMs = data.timeoutMs;
+  if (data.features && typeof data.features === 'object') state.convertCapabilities.features = data.features;
 }
 
-export function applyRemoteText(text, version) {
-  if (version <= state.textVersion) return;
-  if (document.activeElement === textarea()) {
-    queueRemoteText(text, version);
-    return;
-  }
-  applyTextState(text, version);
-}
-
-function sendText() {
-  clearTimeout(state.sendTimeout);
-  state.sendTimeout = setTimeout(sendTextNow, 300);
-}
-
-export async function sendTextNow() {
-  state.sendTimeout = null;
-  const requestId = ++state.lastTextRequestId;
-  const padId = state.currentPadId;
-  try {
-    const data = await updatePadText(padId, textarea().value, state.wsId);
-    if (requestId === state.lastTextRequestId) {
-      state.textVersion = Math.max(state.textVersion, data.textVersion || 0);
-    }
-  } catch (e) {
-    console.warn('Failed to sync text:', e);
-  }
-}
-
-export function initTextSync() {
-  const ta = textarea();
-  ta.addEventListener('input', () => { sendText(); updateTextStats(); });
-  ta.addEventListener('blur', () => { applyPendingRemoteText(); });
-  updateTextStats();
-}
-
-// --- WebSocket ---
+// --- WebSocket connection ---
 
 export function connectWS() {
   if (state.ws) {
@@ -125,15 +91,17 @@ export function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const padToken = getPadToken(state.currentPadId);
   const params = new URLSearchParams({ pad: String(state.currentPadId) });
-  if (padToken) params.set('padToken', padToken);
   const newWs = new WebSocket(`${proto}//${location.host}/?${params}`);
   state.ws = newWs;
 
   newWs.onopen = () => {
     if (state.ws !== newWs) return;
+    // Send padToken as first message instead of URL param to avoid log exposure
+    if (padToken) newWs.send(JSON.stringify({ type: 'auth', padToken }));
     state.reconnectAttempts = 0;
     $('#status').className = 'status online';
     $('#status').title = 'Connected';
+    flushPatchQueue();
     loadPadContent();
   };
 
@@ -144,6 +112,14 @@ export function connectWS() {
     switch (msg.type) {
       case 'hello':
         state.wsId = msg.wsId;
+        break;
+      case 'patch-ack':
+        if (msg.textVersion) state.textVersion = Math.max(state.textVersion, msg.textVersion);
+        break;
+      case 'patch':
+        if (msg.padId === state.currentPadId && msg.senderId !== state.wsId) {
+          applyRemotePatch(msg.data, msg.textVersion);
+        }
         break;
       case 'text-update':
         if (msg.padId === state.currentPadId) applyRemoteText(msg.text, msg.textVersion);
@@ -191,149 +167,4 @@ export function connectWS() {
   };
 
   newWs.onerror = () => newWs.close();
-}
-
-// --- Markdown Preview ---
-
-export async function openMarkdownPreview(file) {
-  const modal = $('#preview-modal');
-  const titleEl = $('#preview-title');
-  const bodyEl = $('#preview-body');
-  state.previewTargetId = file.id;
-  titleEl.textContent = file.originalName;
-  bodyEl.className = 'preview-body is-loading';
-  bodyEl.textContent = 'Loading...';
-  modal.hidden = false;
-
-  try {
-    const padToken = getPadToken(file.padId || state.currentPadId);
-    const url = padToken
-      ? `/api/files/${file.id}?padToken=${encodeURIComponent(padToken)}`
-      : `/api/files/${file.id}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `HTTP ${res.status}`);
-    }
-    const markdown = await res.text();
-    if (state.previewTargetId !== file.id) return;
-    let html;
-    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
-      html = `<pre>${escapeHtml(markdown)}</pre>`;
-    } else {
-      html = DOMPurify.sanitize(marked.parse(markdown, { async: false }));
-    }
-    bodyEl.className = 'preview-body';
-    bodyEl.innerHTML = html;
-  } catch (e) {
-    if (state.previewTargetId !== file.id) return;
-    bodyEl.className = 'preview-body is-error';
-    bodyEl.textContent = e.message || 'Failed to load preview';
-  }
-}
-
-export function closeMarkdownPreview() {
-  const modal = $('#preview-modal');
-  if (!modal || modal.hidden) return;
-  modal.hidden = true;
-  $('#preview-body').innerHTML = '';
-}
-
-// --- QR Code ---
-
-export function initQR() {
-  const titleEl = document.querySelector('.header-left');
-  const qrPopup = $('#qr-popup');
-  const qrImg = $('#qr-image');
-  let qrLoaded = false;
-
-  titleEl.addEventListener('mouseenter', () => {
-    if (!qrLoaded) { qrImg.src = '/api/qrcode'; qrLoaded = true; }
-    qrPopup.hidden = false;
-  });
-  titleEl.addEventListener('mouseleave', () => { qrPopup.hidden = true; });
-  titleEl.addEventListener('click', (e) => {
-    if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-      e.stopPropagation();
-      if (!qrLoaded) { qrImg.src = '/api/qrcode'; qrLoaded = true; }
-      qrPopup.hidden = !qrPopup.hidden;
-    }
-  });
-  document.addEventListener('click', (e) => {
-    if (!titleEl.contains(e.target) && !qrPopup.contains(e.target)) qrPopup.hidden = true;
-  });
-}
-
-// --- Export ---
-
-export function initExport() {
-  $('#export-btn').addEventListener('click', () => {
-    const text = textarea().value;
-    if (!text.trim()) { showToast('Nothing to export'); return; }
-    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
-    const a = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    a.href = url;
-    a.download = `pad-${state.currentPadId}.md`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('Exported!');
-  });
-}
-
-// --- Keyboard Shortcuts ---
-
-export function initKeyboard() {
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      $('#password-modal').hidden = true;
-      $('#unlock-modal').hidden = true;
-      $('#confirm-modal').hidden = true;
-      const inviteModal = $('#invite-modal');
-      if (inviteModal) inviteModal.hidden = true;
-      const uploadModal = $('#upload-confirm-modal');
-      if (uploadModal) uploadModal.hidden = true;
-      closeMarkdownPreview();
-    }
-  });
-}
-
-// --- Beforeunload (flush debounced text sync) ---
-
-export function initBeforeUnload() {
-  window.addEventListener('beforeunload', () => {
-    if (state.sendTimeout) {
-      clearTimeout(state.sendTimeout);
-      state.sendTimeout = null;
-      const token = getPadToken(state.currentPadId);
-      const payload = JSON.stringify({ text: textarea().value, _wsId: state.wsId });
-      const blob = new Blob([payload], { type: 'application/json' });
-      const url = token
-        ? `/api/pads/${state.currentPadId}/text?padToken=${encodeURIComponent(token)}`
-        : `/api/pads/${state.currentPadId}/text`;
-      navigator.sendBeacon(url, blob);
-    }
-  });
-}
-
-// --- Identity event bindings ---
-
-export function initIdentityBindings() {
-  $('#copy-user-code-btn').addEventListener('click', copyUserCode);
-}
-
-// --- Convert Capabilities ---
-
-export async function loadConvertCapabilitiesUI() {
-  const { loadConvertCapabilities } = await import('./server.js');
-  const { refreshConvertibleExts } = await import('./core.js');
-  const data = await loadConvertCapabilities();
-  if (!data) return;
-  if (Array.isArray(data.extensions)) {
-    state.convertCapabilities.extensions = data.extensions;
-    refreshConvertibleExts();
-  }
-  if (typeof data.maxBytes === 'number') state.convertCapabilities.maxBytes = data.maxBytes;
-  if (typeof data.timeoutMs === 'number') state.convertCapabilities.timeoutMs = data.timeoutMs;
-  if (data.features && typeof data.features === 'object') state.convertCapabilities.features = data.features;
 }

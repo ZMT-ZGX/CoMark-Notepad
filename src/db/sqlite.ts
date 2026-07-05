@@ -65,6 +65,25 @@ CREATE TABLE IF NOT EXISTS revoked_tokens (
   token TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS pad_search USING fts5(
+  id UNINDEXED,
+  title,
+  content,
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS pad_ai AFTER INSERT ON pads BEGIN
+  INSERT INTO pad_search(id, title, content) VALUES (NEW.id, '', NEW.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS pad_ad AFTER DELETE ON pads BEGIN
+  DELETE FROM pad_search WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS pad_au AFTER UPDATE OF text ON pads BEGIN
+  UPDATE pad_search SET content = NEW.text WHERE id = NEW.id;
+END;
 `;
 
 /**

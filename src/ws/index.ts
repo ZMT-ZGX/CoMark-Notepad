@@ -25,7 +25,8 @@ function initWSS(server, padService) {
     }
 
     // Per-IP connection limit to prevent single-IP pool exhaustion
-    const clientIp = req.ip || req.socket.remoteAddress;
+    // Note: req.ip is an Express property — unavailable on raw upgrade req.
+    const clientIp = req.socket.remoteAddress;
     if (connections.getIpCount(clientIp) >= MAX_WS_CONNECTIONS_PER_IP) {
       ws.close(1013, 'Connection limit reached for this IP');
       return;
@@ -68,32 +69,58 @@ function initWSS(server, padService) {
       return;
     }
 
-    // Password-protected pad: require a valid unlock token via query string
-    if (targetPad.password) {
-      const padToken = url.searchParams.get('padToken') || null;
-      if (!padService || !padService.isValidUnlockToken(padToken, padId)) {
-        ws.close(4403, 'Pad locked');
-        return;
-      }
+    function finalizeConnection() {
+      ws.ipAddress = clientIp;
+      ws.clientId = generateId();
+      ws.padId = padId;
+      ws.isAlive = true;
+      connections.add(ws, { clientId: ws.clientId, padId, userId: ws.userId, ipAddress: clientIp });
+
+      ws.on('pong', () => { ws.isAlive = true; });
+      ws.on('close', () => {
+        connections.remove(ws);
+        broadcast.toPad(padId, { type: 'online-count', padId, count: connections.getPadCount(padId) });
+      });
+      ws.on('error', () => connections.remove(ws));
+      ws.on('message', (raw) => {
+        let msg;
+        try { msg = JSON.parse(raw as string); } catch { return; }
+        if (msg.type === 'patch' && padService) {
+          padService.applyPatch(ws.userId, padId, msg.data, ws.clientId)
+            .then((result) => {
+              if (result) {
+                try {
+                  ws.send(JSON.stringify({ type: 'patch-ack', textVersion: result.textVersion }));
+                } catch {}
+              }
+            })
+            .catch(() => {});
+        }
+      });
+
+      ws.send(JSON.stringify({ type: 'hello', wsId: ws.clientId, padId, userId: ws.userId }));
+      broadcast.toPad(padId, { type: 'online-count', padId, count: connections.getPadCount(padId) });
     }
 
-    ws.ipAddress = clientIp;
-    ws.clientId = generateId();
-    ws.padId = padId;
-    ws.isAlive = true;
-    connections.add(ws, { clientId: ws.clientId, padId, userId: ws.userId, ipAddress: clientIp });
-
-    ws.on('pong', () => {
-      ws.isAlive = true;
-    });
-    ws.on('close', () => {
-      connections.remove(ws);
-      broadcast.toPad(padId, { type: 'online-count', count: connections.getPadCount(padId) });
-    });
-    ws.on('error', () => connections.remove(ws));
-
-    ws.send(JSON.stringify({ type: 'hello', wsId: ws.clientId, padId, userId: ws.userId }));
-    broadcast.toPad(padId, { type: 'online-count', count: connections.getPadCount(padId) });
+    // Password-protected pad: token sent as first WebSocket message (not in URL)
+    // to avoid exposing it in proxy/server access logs.
+    if (targetPad.password) {
+      const authTimer = setTimeout(() => ws.close(4403, 'Pad locked'), 1500);
+      // Clear timer if socket closes before auth (e.g. client disconnect, heartbeat timeout)
+      ws.once('close', () => clearTimeout(authTimer));
+      ws.once('message', (raw) => {
+        clearTimeout(authTimer);
+        let msg;
+        try { msg = JSON.parse(raw as string); } catch { ws.close(4400, 'Invalid message'); return; }
+        if (msg.type !== 'auth' || !padService || !padService.isValidUnlockToken(msg.padToken, padId)) {
+          ws.close(4403, 'Pad locked');
+          return;
+        }
+        finalizeConnection();
+      });
+    } else {
+      finalizeConnection();
+    }
   });
 
   // Heartbeat

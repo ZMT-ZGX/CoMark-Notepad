@@ -88,17 +88,6 @@ class ConvertService {
         throw BadRequestError('File too large to convert');
       }
 
-      // Check if already converted
-      const baseName = file.originalName.replace(/\.[^.]+$/, '');
-      const mdOriginalName = `${baseName}.md`;
-      if (
-        this.store
-          .findAllFiles()
-          .some((f) => f.originalName === mdOriginalName && f.padId === file.padId)
-      ) {
-        throw ConflictError('Already converted');
-      }
-
       // Prevent concurrent converts of the same file
       if (this.convertingFiles.has(fileId)) {
         throw ConflictError('Conversion already in progress');
@@ -126,7 +115,8 @@ class ConvertService {
       }
 
       const mdId = generateId();
-      const safeBaseName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
+      const rawBase = path.basename(file.originalName, path.extname(file.originalName));
+      const safeBaseName = rawBase.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
       const safeMdName = `${safeBaseName}.md`;
       const mdDiskName = `${mdId}_${safeMdName}`;
       mdDiskPath = path.join(this.store.FILES_DIR, mdDiskName);
@@ -137,7 +127,7 @@ class ConvertService {
       const mdFile = {
         id: mdId,
         filename: mdDiskName,
-        originalName: mdOriginalName,
+        originalName: safeMdName,
         size: Buffer.byteLength(markdown, 'utf8'),
         mimeType: 'text/markdown',
         createdAt: Date.now(),
@@ -151,8 +141,8 @@ class ConvertService {
         fs.unlinkSync(filepath);
       } catch {}
 
-      this.broadcast.toPad(file.padId, { type: 'file-deleted', fileId: file.id });
-      this.broadcast.toPad(mdFile.padId, { type: 'file-added', file: mdFile });
+      this.broadcast.toPad(file.padId, { type: 'file-deleted', padId: file.padId, fileId: file.id });
+      this.broadcast.toPad(mdFile.padId, { type: 'file-added', padId: mdFile.padId, file: mdFile });
 
       return mdFile;
     } finally {
@@ -209,4 +199,4 @@ class ConvertService {
   }
 }
 
-module.exports = ConvertService;
+export = ConvertService;

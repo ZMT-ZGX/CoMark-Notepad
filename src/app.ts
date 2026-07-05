@@ -10,7 +10,7 @@ const errorHandler = require('./middlewares/errorHandler');
 const { mountRoutes } = require('./routes');
 const logger = require('./utils/logger');
 
-function createApp(services, getServerPort) {
+function createApp(services, getServerPort, getPadClients) {
   const app = express();
   app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 0));
   app.disable('x-powered-by');
@@ -82,11 +82,41 @@ function createApp(services, getServerPort) {
     next();
   });
 
-  // Static files
+  // Static files (public/ and vendored browser libs)
   app.use(express.static(path.join(__dirname, '..', 'public')));
+  app.use('/vendor', express.static(path.join(__dirname, '..', 'public', 'vendor')));
+
+  // Full-text search (FTS5) — scoped to pads the current user can access
+  app.get('/api/search', (req, res, next) => {
+    try {
+      const raw = String(req.query.q || '').trim().slice(0, 200);
+      if (!raw) return res.json({ results: [] });
+      // Build MATCH query: wrap each token in quotes for phrase search,
+      // AND them together so multi-term narrows results.
+      const tokens = raw.split(/\s+/).filter(Boolean).map((t) => `"${t.replace(/"/g, '""')}"`).join(' AND ');
+      const db = services.db;
+      const { padService } = services;
+      const rows = db.searchPads(tokens);
+      // Use full pad from DB so invitation-grant check in canAccessPad works correctly.
+      const results = rows
+        .map((r) => {
+          const pad = db.pads.findById(r.id);
+          if (!pad || !padService.canAccessPad(req.userId, pad)) return null;
+          return {
+            id: r.id,
+            content: r.content,
+            snippet: db.searchSnippet(tokens, r.id),
+          };
+        })
+        .filter(Boolean);
+      res.json({ results });
+    } catch (e) {
+      next(e);
+    }
+  });
 
   // Mount all API routes
-  mountRoutes(app, services, getServerPort);
+  mountRoutes(app, services, getServerPort, getPadClients);
 
   // Global error handler
   app.use(errorHandler);

@@ -1,6 +1,6 @@
 'use strict';
 
-import type { WebSocket } from 'ws';
+import type { CoMarkWebSocket } from '../types';
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { checkOrigin, requirePadUnlock } = require('../middlewares/security');
@@ -34,7 +34,7 @@ const publicPadCreateLimiter = rateLimit({
   message: { error: 'Too many public pad creations.' },
 });
 
-function createRouter(padService) {
+function createRouter(padService, getPadClients) {
   const router = express.Router();
   const padUnlock = requirePadUnlock(padService);
 
@@ -112,14 +112,15 @@ function createRouter(padService) {
         const padId = Number(req.params.id);
         if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
         const unlockToken = req.headers['x-pad-token'];
-        const { password, currentPassword } = req.body;
+        const { password, currentPassword, _wsId } = req.body;
         const result = await padService.setPassword(
           req.userId,
           isAdmin(req),
           padId,
           password,
           currentPassword,
-          unlockToken
+          unlockToken,
+          _wsId
         );
         res.json(result);
       } catch (e) {
@@ -128,8 +129,8 @@ function createRouter(padService) {
     }
   );
 
-  // Delete pad
-  router.delete('/:id', checkOrigin, padUnlock, async (req, res, next) => {
+  // Delete pad (owner/admin can delete even without unlock token)
+  router.delete('/:id', checkOrigin, async (req, res, next) => {
     try {
       const padId = Number(req.params.id);
       if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
@@ -137,10 +138,9 @@ function createRouter(padService) {
       const result = await padService.deletePad(req.userId, isAdmin(req), padId);
 
       // Disconnect AFTER successful deletion
-      const { getPadClients } = require('../ws/connections');
       const deletedClients = getPadClients(padId);
       if (deletedClients) {
-        for (const ws of Array.from(deletedClients) as WebSocket[]) {
+        for (const ws of Array.from(deletedClients) as CoMarkWebSocket[]) {
           try {
             ws.close(4404, 'Pad deleted');
           } catch {}

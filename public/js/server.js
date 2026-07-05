@@ -45,12 +45,13 @@ export async function deletePadApi(padId) {
   }
 }
 
-export async function setPadPassword(padId, password, currentPassword) {
+export async function setPadPassword(padId, password, currentPassword, wsId = state.wsId) {
   const token = getPadToken(padId);
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['X-Pad-Token'] = token;
   const body = { password: password || null };
   if (currentPassword) body.currentPassword = currentPassword;
+  if (wsId) body._wsId = wsId;
   const res = await fetch(`/api/pads/${padId}/password`, {
     method: 'POST',
     headers,

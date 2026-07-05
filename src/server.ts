@@ -1,5 +1,7 @@
 'use strict';
 
+import type { Services } from './types';
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -20,7 +22,7 @@ const InviteService = require('./services/inviteService');
 const ConvertService = require('./services/convertService');
 
 async function start() {
-  // 1. Load store from disk
+  // 1. Open SQLite database (backward-compat method name from JSON store era)
   await db.store.load();
 
   // 2. Migrate store format (if needed)
@@ -35,16 +37,17 @@ async function start() {
   // 5. Create unified data-access facade (services depend on this, not raw db)
   const dataStore = createDataStore(db);
 
-  // 6. Create Service instances (DI: inject store + broadcast)
-  const padService = new PadService(dataStore, broadcast);
+  // 6. Create Service instances (DI: inject store + broadcast + connections)
+  const connections = require('./ws/connections');
+  const padService = new PadService(dataStore, broadcast, connections.getPadClients);
   const fileService = new FileService(dataStore, broadcast, padService);
-  const inviteService = new InviteService(dataStore, broadcast);
+  const inviteService = new InviteService(dataStore, broadcast, connections.getPadClients);
   const convertService = new ConvertService(dataStore, broadcast);
 
-  const services = { db, padService, fileService, inviteService, convertService };
+  const services: Services = { db, padService, fileService, inviteService, convertService };
 
   // 6. Create Express app
-  const app = createApp(services, getServerPort);
+  const app = createApp(services, getServerPort, connections.getPadClients);
 
   // 7. Create HTTP server
   const server = http.createServer(app);
@@ -71,7 +74,8 @@ async function start() {
     }
     const defaultPadId = db.pads.findAll()[0]?.id || 1;
     for (const file of expired) {
-      broadcast.toPad(file.padId || defaultPadId, { type: 'file-deleted', fileId: file.id });
+      const filePadId = file.padId || defaultPadId;
+      broadcast.toPad(filePadId, { type: 'file-deleted', padId: filePadId, fileId: file.id });
     }
     logger.info(`Cleaned up ${expired.length} expired file(s) (TTL=${FILE_TTL_HOURS}h)`);
   }
@@ -86,6 +90,7 @@ async function start() {
     clearInterval(fileTtlTimer);
     clearInterval(padService.getCleanupTimer());
     clearInterval(session.getCleanupTimer());
+    // Close SQLite database (backward-compat method name from JSON store era)
     db.store.flushSync();
 
     // Close all WebSocket connections
@@ -124,30 +129,21 @@ async function start() {
     // Initial TTL cleanup run
     cleanupExpiredFiles();
 
-    // Startup banner
-    console.log('');
-    console.log('  ╔══════════════════════════════════════════╗');
-    console.log('  ║     CoMark-Notepad is running!         ║');
-    console.log('  ╠══════════════════════════════════════════╣');
-    console.log(`  ║  Local:   http://localhost:${currentPort}`.padEnd(44) + '║');
-    console.log(`  ║  Network: ${url}`.padEnd(44) + '║');
+    // Startup info
+    logger.info('CoMark-Notepad is running!');
+    logger.info(`  Local:   http://localhost:${currentPort}`);
+    logger.info(`  Network: ${url}`);
     const padCount = db.pads.findAll().length;
-    console.log(`  ║  Pads:    ${padCount}`.padEnd(44) + '║');
-    console.log('  ╚══════════════════════════════════════════╝');
-    console.log('');
+    logger.info(`  Pads:    ${padCount}`);
 
     const { isProduction, PUBLIC_ORIGIN } = require('./config');
     if (isProduction && !PUBLIC_ORIGIN) {
-      console.log('  ⚠  WARNING: PUBLIC_ORIGIN is not set. Origin-based CSRF protection');
-      console.log('     will accept any localhost/LAN origin. Set PUBLIC_ORIGIN in production.');
-      console.log('');
+      logger.warn('PUBLIC_ORIGIN is not set. Origin-based CSRF protection will accept any localhost/LAN origin. Set PUBLIC_ORIGIN in production.');
     }
 
     try {
       const qr = await QRCode.toString(url, { type: 'terminal', small: true });
-      console.log('  Scan QR code to connect from phone:');
-      console.log('');
-      console.log(qr);
+      logger.info(`Scan QR code to connect from phone:\n${qr}`);
     } catch {}
   });
 

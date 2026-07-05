@@ -12,11 +12,13 @@ import { loadPadContent, renderPadTabs, refreshPads, updateLockButton, initLockB
 import { initFileSearch, initFileUpload, startTimeLabelUpdater, stopTimeLabelUpdater } from './js/files.js';
 import { initPasswordModal, initUnlockModal } from './js/modals.js';
 import { initInvitation } from './js/invitation.js';
-import {
-  initIdentity, initIdentityBindings, connectWS, initTextSync,
-  initQR, initExport, initKeyboard, initBeforeUnload,
-  loadConvertCapabilitiesUI,
-} from './js/ws.js';
+import { initIdentity, initIdentityBindings, connectWS, loadConvertCapabilitiesUI } from './js/ws.js';
+import { initTextSync } from './js/text-sync.js';
+import { initQR } from './js/qr.js';
+import { initExport, initBeforeUnload } from './js/export.js';
+import { initShortcuts } from './js/shortcuts.js';
+import { initGestures, reinitGesturesOnResize } from './js/gestures.js';
+import { initSearch } from './js/search.js';
 
 // --- Mobile detection ---
 function updateMobileClass() {
@@ -27,11 +29,17 @@ updateMobileClass();
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(updateMobileClass, 150);
+  resizeTimer = setTimeout(() => {
+    updateMobileClass();
+    reinitGesturesOnResize();
+  }, 150);
 });
 window.addEventListener('orientationchange', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(updateMobileClass, 300);
+  resizeTimer = setTimeout(() => {
+    updateMobileClass();
+    reinitGesturesOnResize();
+  }, 300);
 });
 
 // --- Visibility change (coordinates files + ws modules) ---
@@ -58,9 +66,11 @@ async function init() {
   initFileUpload();
   initQR();
   initExport();
-  initKeyboard();
   initBeforeUnload();
   initIdentityBindings();
+  initShortcuts(hotkeys);
+  initGestures();
+  initSearch();
 
   // Async: load capabilities + identity in parallel
   await Promise.all([loadConvertCapabilitiesUI(), initIdentity()]);

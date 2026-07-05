@@ -1,7 +1,6 @@
 'use strict';
 
-import type * as zod from 'zod';
-const { z } = require('zod');
+import { z } from 'zod';
 
 const ClearFilesSchema = z.object({
   padId: z.number().int().positive(),
@@ -12,7 +11,7 @@ const DeleteFileSchema = z.object({
   _wsId: z.string().optional(),
 });
 
-export type ClearFilesInput = zod.infer<typeof ClearFilesSchema>;
-export type DeleteFileInput = zod.infer<typeof DeleteFileSchema>;
+export type ClearFilesInput = z.infer<typeof ClearFilesSchema>;
+export type DeleteFileInput = z.infer<typeof DeleteFileSchema>;
 
-module.exports = { ClearFilesSchema, DeleteFileSchema };
+export { ClearFilesSchema, DeleteFileSchema };

@@ -1,7 +1,6 @@
 'use strict';
 
-import type * as zod from 'zod';
-const { z } = require('zod');
+import { z } from 'zod';
 
 const CreateInvitationSchema = z.object({
   maxUses: z.number().int().min(0).default(1),
@@ -12,7 +11,7 @@ const RedeemInvitationSchema = z.object({
   token: z.string().min(1),
 });
 
-export type CreateInvitationInput = zod.infer<typeof CreateInvitationSchema>;
-export type RedeemInvitationInput = zod.infer<typeof RedeemInvitationSchema>;
+export type CreateInvitationInput = z.infer<typeof CreateInvitationSchema>;
+export type RedeemInvitationInput = z.infer<typeof RedeemInvitationSchema>;
 
-module.exports = { CreateInvitationSchema, RedeemInvitationSchema };
+export { CreateInvitationSchema, RedeemInvitationSchema };

@@ -13,7 +13,7 @@ function errorHandler(err, req, res, next) {
   if (err && err.type === 'entity.too.large') {
     return res.status(413).json({ error: `File too large (max ${formatBytes(MAX_FILE_BYTES)})` });
   }
-  if (err && err.status >= 400 && err.status < 500) {
+  if (err && Number.isFinite(err.status) && err.status >= 400 && err.status < 500) {
     // Don't echo raw err.message — it may contain parser internals
     return res.status(err.status).json({ error: 'Bad request' });
   }

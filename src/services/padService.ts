@@ -1,6 +1,10 @@
 'use strict';
 
-import type { DataStore, Broadcast, UnlockTokenEntry } from '../types';
+import type { DataStore, Broadcast, UnlockTokenEntry, CoMarkWebSocket } from '../types';
+const path = require('path');
+const fs = require('fs');
+const logger = require('../utils/logger');
+const DiffMatchPatch = require('diff-match-patch');
 const {
   NotFoundError,
   ForbiddenError,
@@ -15,12 +19,14 @@ const { MAX_PADS, UNLOCK_TOKEN_TTL_MS } = require('../config');
 class PadService {
   store: DataStore;
   broadcast: Broadcast;
+  getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null;
   unlockTokens: Map<string, UnlockTokenEntry>;
   unlockCleanupTimer: ReturnType<typeof setInterval>;
 
-  constructor(store, broadcast) {
+  constructor(store, broadcast, getPadClients = null) {
     this.store = store;
     this.broadcast = broadcast;
+    this.getPadClients = getPadClients;
     this.unlockTokens = new Map();
     this.unlockCleanupTimer = setInterval(() => {
       const now = Date.now();
@@ -102,6 +108,45 @@ class PadService {
     };
   }
 
+  async applyPatch(userId, padId, patchText, excludeWsId) {
+    const pad = this.store.findPadById(padId);
+    if (!pad) {
+      logger.warn('applyPatch: pad not found', { padId });
+      return null;
+    }
+    if (!this.canAccessPad(userId, pad)) {
+      logger.warn('applyPatch: access denied', { padId, userId });
+      return null;
+    }
+
+    const dmp = new DiffMatchPatch();
+    let patches;
+    try {
+      patches = dmp.patch_fromText(patchText);
+    } catch (e) {
+      logger.warn('applyPatch: malformed patch', { padId, error: (e as Error).message });
+      return null;
+    }
+    const [newText, results] = dmp.patch_apply(patches, pad.text);
+    if (!Array.isArray(results) || results.some((r) => !r)) {
+      logger.warn('applyPatch: patch_apply failed', { padId, results });
+      return null;
+    }
+
+    const updated = this.store.updatePadText(padId, newText);
+    if (!updated) {
+      logger.warn('applyPatch: updatePadText returned null', { padId });
+      return null;
+    }
+
+    this.broadcast.toPad(
+      padId,
+      { type: 'patch', padId, data: patchText, textVersion: updated.textVersion, senderId: excludeWsId || null },
+      excludeWsId
+    );
+    return updated;
+  }
+
   async updateText(userId, padId, text, excludeWsId) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
@@ -135,7 +180,15 @@ class PadService {
     return pad;
   }
 
-  async setPassword(userId, isAdminUser, padId, newPassword, currentPassword, unlockToken) {
+  async setPassword(
+    userId,
+    isAdminUser,
+    padId,
+    newPassword,
+    currentPassword,
+    unlockToken,
+    excludeWsId
+  ) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
 
@@ -167,6 +220,15 @@ class PadService {
     let newToken = null;
     if (updated.password) {
       newToken = this.createUnlockToken(padId);
+      const clients = this.getPadClients ? this.getPadClients(padId) : undefined;
+      if (clients) {
+        for (const ws of Array.from(clients) as CoMarkWebSocket[]) {
+          if (excludeWsId && ws.clientId === excludeWsId) continue;
+          try {
+            ws.close(4403, 'Pad locked');
+          } catch {}
+        }
+      }
     }
 
     this.broadcast.toAll({ type: 'pad-updated', pad: this.padMeta(updated) });
@@ -188,8 +250,13 @@ class PadService {
       if (entry.padId === padId) this.unlockTokens.delete(token);
     }
 
-    // Delete files via store (handles disk + persistence)
+    // Delete files (both DB rows and disk) BEFORE removing the pad
     const filesToDelete = this.store.findAllFiles().filter((f) => (f.padId || 1) === padId);
+    for (const file of filesToDelete) {
+      try {
+        fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
+      } catch { /* file may have already been removed */ }
+    }
     if (filesToDelete.length > 0) {
       this.store.removeFilesMany(filesToDelete.map((f) => f.id));
     }
@@ -197,7 +264,7 @@ class PadService {
     this.store.removePad(padId);
     this.broadcast.toAll({ type: 'pad-deleted', padId });
     for (const file of filesToDelete) {
-      this.broadcast.toPad(padId, { type: 'file-deleted', fileId: file.id });
+      this.broadcast.toPad(padId, { type: 'file-deleted', padId, fileId: file.id });
     }
 
     return { ok: true, deletedFiles: filesToDelete.length };
@@ -220,4 +287,4 @@ class PadService {
   }
 }
 
-module.exports = PadService;
+export = PadService;

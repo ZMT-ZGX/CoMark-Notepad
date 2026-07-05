@@ -58,12 +58,14 @@ async function redeemInvite() {
   }
 }
 
+export function toggleInviteModal() {
+  const modal = $('#invite-modal');
+  modal.hidden = !modal.hidden;
+  $('#redeem-error').hidden = true;
+}
+
 export function initInvitation() {
-  $('#invite-btn').addEventListener('click', () => {
-    const modal = $('#invite-modal');
-    modal.hidden = !modal.hidden;
-    $('#redeem-error').hidden = true;
-  });
+  $('#invite-btn').addEventListener('click', toggleInviteModal);
   $('#generate-invite-btn').addEventListener('click', generateInvitation);
   $('#copy-invite-btn').addEventListener('click', copyInviteToken);
   $('#close-invite-btn').addEventListener('click', hideInviteModal);

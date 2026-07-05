@@ -86,10 +86,12 @@ function cookieHeader(cookie) {
   return { Cookie: `session_token=${cookie}` };
 }
 
-async function registerUser(baseUrl) {
-  const res = await fetch(`${baseUrl}/api/auth/register`, { method: 'POST' });
+async function registerUser(baseUrl, headers = {}) {
+  const res = await fetch(`${baseUrl}/api/auth/register`, { method: 'POST', headers });
+  assert.equal(res.status, 200, 'registration should succeed');
   const data = await res.json();
   const cookie = extractCookie(res);
+  assert.ok(cookie, 'registration should set a session cookie');
   return { code: data.code, token: data.token, cookie };
 }
 
@@ -500,7 +502,7 @@ test('missing origin header is allowed (same-origin non-browser)', async () => {
 test('PUBLIC_ORIGIN env var configures origin check', async () => {
   const server = await startServer({ PUBLIC_ORIGIN: 'http://custom.example.com' });
   try {
-    const user = await registerUser(server.baseUrl);
+    const user = await registerUser(server.baseUrl, { Origin: 'http://custom.example.com' });
 
     // Wrong origin should be rejected
     const wrong = await fetch(`${server.baseUrl}/api/pads/1/password`, {
@@ -967,24 +969,124 @@ test('WebSocket rejects connection to password-protected pad without unlock toke
     const setData = await setRes.json();
     assert.ok(setData.token, 'password set should return an unlock token');
 
-    // WS connection without padToken should be rejected (4403)
+    // WS connection without padToken should be rejected (4403) after auth timeout
     const rejected = await new Promise((resolve) => {
       const ws = new WebSocket(`${server.wsUrl}/?pad=1`);
       ws.once('close', (code) => resolve({ code }));
       ws.once('error', () => resolve({ code: -1 }));
-      setTimeout(() => resolve({ code: 0 }), 1000);
+      setTimeout(() => resolve({ code: 0 }), 2500);
     });
     assert.equal(rejected.code, 4403, 'WS to locked pad without token should be rejected');
 
-    // WS connection WITH padToken should succeed
+    // WS connection WITH padToken sent as first message should succeed
     const accepted = await new Promise((resolve) => {
-      const ws = new WebSocket(`${server.wsUrl}/?pad=1&padToken=${setData.token}`);
-      ws.once('open', () => { ws.close(); resolve({ ok: true }); });
+      const ws = new WebSocket(`${server.wsUrl}/?pad=1`);
+      ws.once('open', () => {
+        ws.send(JSON.stringify({ type: 'auth', padToken: setData.token }));
+      });
+      ws.once('message', (data) => {
+        const msg = JSON.parse(data);
+        if (msg.type === 'hello') { ws.close(); resolve({ ok: true }); }
+      });
       ws.once('error', () => resolve({ ok: false }));
-      setTimeout(() => resolve({ ok: false }), 1000);
+      setTimeout(() => resolve({ ok: false }), 2500);
     });
-    assert.equal(accepted.ok, true, 'WS with valid padToken should connect');
+    assert.equal(accepted.ok, true, 'WS with valid padToken message should connect');
   } finally {
+    await stopServer(server);
+  }
+});
+
+test('setting a pad password disconnects existing unauthenticated WebSocket clients', async () => {
+  const server = await startServer({ ADMIN_TOKEN: 'admin123' });
+  let ws;
+  try {
+    ws = new WebSocket(`${server.wsUrl}/?pad=1`);
+    await new Promise((resolve, reject) => {
+      ws.once('message', (data) => {
+        const msg = JSON.parse(data);
+        if (msg.type === 'hello') resolve();
+      });
+      ws.once('error', reject);
+      setTimeout(() => reject(new Error('Timed out waiting for hello')), 1500);
+    });
+
+    const closed = new Promise((resolve) => {
+      ws.once('close', (code) => resolve(code));
+      setTimeout(() => resolve(0), 1500);
+    });
+
+    const setRes = await fetch(`${server.baseUrl}/api/pads/1/password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': 'admin123',
+        Origin: server.baseUrl,
+      },
+      body: JSON.stringify({ password: 'secret' }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.equal(await closed, 4403);
+  } finally {
+    if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
+    await stopServer(server);
+  }
+});
+
+test('deleting invitation disconnects WebSocket clients whose grant was revoked', async () => {
+  const server = await startServer();
+  let ws;
+  try {
+    const alice = await registerUser(server.baseUrl);
+    const bob = await registerUser(server.baseUrl);
+
+    const padRes = await fetch(`${server.baseUrl}/api/pads`, {
+      method: 'POST',
+      headers: cookieHeader(alice.cookie),
+    });
+    assert.equal(padRes.status, 200);
+    const pad = await padRes.json();
+
+    const inviteRes = await fetch(`${server.baseUrl}/api/invitations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...cookieHeader(alice.cookie) },
+      body: JSON.stringify({ maxUses: 1 }),
+    });
+    assert.equal(inviteRes.status, 200);
+    const invite = await inviteRes.json();
+
+    const redeemRes = await fetch(`${server.baseUrl}/api/invitations/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...cookieHeader(bob.cookie) },
+      body: JSON.stringify({ token: invite.token }),
+    });
+    assert.equal(redeemRes.status, 200);
+
+    ws = new WebSocket(`${server.wsUrl}/?pad=${pad.id}`, {
+      headers: cookieHeader(bob.cookie),
+    });
+    await new Promise((resolve, reject) => {
+      ws.once('message', (data) => {
+        const msg = JSON.parse(data);
+        if (msg.type === 'hello') resolve();
+      });
+      ws.once('error', reject);
+      setTimeout(() => reject(new Error('Timed out waiting for hello')), 1500);
+    });
+
+    const closed = new Promise((resolve) => {
+      ws.once('close', (code) => resolve(code));
+      setTimeout(() => resolve(0), 1500);
+    });
+
+    const deleteRes = await fetch(`${server.baseUrl}/api/invitations/${invite.token}`, {
+      method: 'DELETE',
+      headers: cookieHeader(alice.cookie),
+    });
+    assert.equal(deleteRes.status, 200);
+    assert.equal(await closed, 4401);
+  } finally {
+    if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
     await stopServer(server);
   }
 });
@@ -1063,6 +1165,16 @@ test('password-protected pad files require unlock token for delete and clear', a
     }
 
     const first = await upload('first.txt');
+
+    const downloadLocked = await fetch(`${server.baseUrl}/api/files/${first.id}`, {
+      headers: cookieHeader(alice.cookie),
+    });
+    assert.equal(downloadLocked.status, 403);
+
+    const downloadUnlocked = await fetch(`${server.baseUrl}/api/files/${first.id}`, {
+      headers: { ...cookieHeader(alice.cookie), 'X-Pad-Token': token },
+    });
+    assert.equal(downloadUnlocked.status, 200);
 
     const deleteLocked = await fetch(`${server.baseUrl}/api/files/${first.id}`, {
       method: 'DELETE',

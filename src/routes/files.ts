@@ -25,9 +25,14 @@ function createRouter(fileService, padService) {
   });
 
   // Download file
-  router.get('/:id', filePadUnlock, async (req, res, next) => {
+  router.get('/:id', async (req, res, next) => {
     try {
-      const { file, filepath } = await fileService.downloadFile(req.userId, req.params.id);
+      const unlockToken = req.headers['x-pad-token'] || req.query?.padToken;
+      const { file, filepath } = await fileService.downloadFile(
+        req.userId,
+        req.params.id,
+        unlockToken
+      );
 
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Content-Disposition', contentDisposition('attachment', file.originalName));

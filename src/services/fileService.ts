@@ -232,7 +232,7 @@ class FileService {
       finalInfo.padId = targetPadId;
 
       this.store.createFile(finalInfo);
-      this.broadcast.toPad(finalInfo.padId, { type: 'file-added', file: finalInfo }, excludeWsId);
+      this.broadcast.toPad(finalInfo.padId, { type: 'file-added', padId: finalInfo.padId, file: finalInfo }, excludeWsId);
       finished = true;
       if (!res.headersSent) res.json(finalInfo);
     });
@@ -240,10 +240,17 @@ class FileService {
     req.pipe(busboy);
   }
 
-  async downloadFile(userId, fileId) {
+  async downloadFile(userId, fileId, unlockToken) {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
     if (!this.canAccessFile(userId, file)) throw NotFoundError('File not found');
+    const pad = this.store.findPadById(file.padId || 1);
+    if (
+      pad?.password &&
+      (!this.padService || !this.padService.isValidUnlockToken(unlockToken, pad.id))
+    ) {
+      throw ForbiddenError('Pad locked');
+    }
     const filepath = path.join(this.store.FILES_DIR, file.filename);
     return { file, filepath };
   }
@@ -272,7 +279,7 @@ class FileService {
     try {
       fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
     } catch {}
-    this.broadcast.toPad(file.padId || 1, { type: 'file-deleted', fileId }, excludeWsId);
+    this.broadcast.toPad(file.padId || 1, { type: 'file-deleted', padId: file.padId || 1, fileId }, excludeWsId);
     return { ok: true };
   }
 
@@ -294,10 +301,10 @@ class FileService {
       this.store.removeFilesMany(toDelete.map((f) => f.id));
     }
     for (const file of toDelete) {
-      this.broadcast.toPad(padId, { type: 'file-deleted', fileId: file.id }, excludeWsId);
+      this.broadcast.toPad(padId, { type: 'file-deleted', padId, fileId: file.id }, excludeWsId);
     }
     return { ok: true, cleared: toDelete.length };
   }
 }
 
-module.exports = FileService;
+export = FileService;

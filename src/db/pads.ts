@@ -47,6 +47,51 @@ function remove(id) {
   db.prepare('DELETE FROM pads WHERE id = ?').run(id);
 }
 
+/**
+ * Full-text search via FTS5 (trigram tokenizer).
+ * Returns padId + content (truncated to 200 chars).
+ */
+function searchPads(matchQuery) {
+  const db = sqlite.getDb();
+  // bm25() gives relevance ranking; lower score = better match.
+  const rows = db
+    .prepare(
+      `SELECT s.id, substr(s.content, 1, 200) as content, p.owner_user_id as ownerUserId
+       FROM pad_search s
+       JOIN pads p ON p.id = s.id
+       WHERE s MATCH ?
+       ORDER BY bm25(s)
+       LIMIT 20`
+    )
+    .all(matchQuery);
+  return rows;
+}
+
+/**
+ * Return a highlighted snippet of the pad text centered on the first match,
+ * using FTS5's built-in snippet() helper. Returns '' if no match.
+ */
+function searchSnippet(matchQuery, padId?) {
+  const db = sqlite.getDb();
+  try {
+    const sql = padId != null
+      ? `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
+         FROM pad_search
+         WHERE pad_search MATCH ? AND id = ?
+         LIMIT 1`
+      : `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
+         FROM pad_search
+         WHERE pad_search MATCH ?
+         LIMIT 1`;
+    const row = padId != null
+      ? db.prepare(sql).get(matchQuery, padId)
+      : db.prepare(sql).get(matchQuery);
+    return row?.snippet || '';
+  } catch {
+    return '';
+  }
+}
+
 function rowToPad(row) {
   return {
     id: row.id,
@@ -66,4 +111,6 @@ module.exports = {
   updateText,
   updatePassword,
   remove,
+  searchPads,
+  searchSnippet,
 };

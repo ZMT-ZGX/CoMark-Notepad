@@ -28,6 +28,7 @@ function canManagePad(userId, isAdminUser, pad) {
   if (pad.creatorCode) {
     return userId === pad.creatorCode || isAdminUser;
   }
+  // Pad has no owner and no creator — only admins can manage
   return isAdminUser;
 }
 

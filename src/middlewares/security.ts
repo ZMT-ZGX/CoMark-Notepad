@@ -1,6 +1,7 @@
 'use strict';
 
-const { PUBLIC_ORIGIN } = require('../config');
+// Only truthy when the operator explicitly set this env var (not the localhost default)
+const EXPLICIT_PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || null;
 
 function isPrivateIp(hostname) {
   // Strip IPv6-mapped IPv4 prefix (e.g. ::ffff:192.168.1.1)
@@ -20,7 +21,10 @@ function isPrivateIp(hostname) {
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   if (origin === 'null') return false;
-  if (origin === PUBLIC_ORIGIN) return true;
+  if (EXPLICIT_PUBLIC_ORIGIN) {
+    // Explicit PUBLIC_ORIGIN: only that origin is allowed (no private-IP bypass)
+    return origin === EXPLICIT_PUBLIC_ORIGIN;
+  }
   try {
     const host = new URL(origin).hostname;
     if (isPrivateIp(host)) return true;

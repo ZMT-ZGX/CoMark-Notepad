@@ -15,6 +15,16 @@ export const state = {
   toastTimer: null,
   previewTargetId: null,
   sendTimeout: null,
+  lastSyncedText: '',
+  patchQueueKey(padId = this.currentPadId) {
+    return `patch-queue:${padId || 1}`;
+  },
+  getPatchQueue(padId = this.currentPadId) {
+    try { return JSON.parse(localStorage.getItem(this.patchQueueKey(padId)) || '[]'); } catch { return []; }
+  },
+  setPatchQueue(q, padId = this.currentPadId) {
+    try { localStorage.setItem(this.patchQueueKey(padId), JSON.stringify(q)); } catch {}
+  },
   convertCapabilities: {
     maxBytes: 10 * 1024 * 1024,
     timeoutMs: 60 * 1000,

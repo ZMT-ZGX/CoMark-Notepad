@@ -18,7 +18,7 @@ const uploadLimiter = rateLimit({
   message: { error: 'Too many uploads.' },
 });
 
-function mountRoutes(app, services, getServerPort) {
+function mountRoutes(app, services, getServerPort, getPadClients) {
   const { db, padService, fileService, inviteService, convertService } = services;
 
   app.use('/api/auth', createAuthRouter(db));
@@ -44,7 +44,7 @@ function mountRoutes(app, services, getServerPort) {
     }
   });
 
-  app.use('/api/pads', createPadsRouter(padService));
+  app.use('/api/pads', createPadsRouter(padService, getPadClients));
   app.use('/api/files', createFilesRouter(fileService, padService));
   app.use('/api/invitations', createInvitationsRouter(inviteService));
   app.use('/api/convert', createConvertRouter(convertService, padService));

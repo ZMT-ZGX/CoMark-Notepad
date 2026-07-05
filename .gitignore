@@ -16,3 +16,7 @@ CLAUDE.md
 AGENTS.md
 *.bak
 .claude/
+test-results/
+playwright-report/
+tests/e2e/.auth/
+tests/e2e/.e2e-data-dir

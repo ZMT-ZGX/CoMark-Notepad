@@ -1,6 +1,6 @@
 'use strict';
 
-import type { DataStore, Broadcast } from '../types';
+import type { DataStore, Broadcast, CoMarkWebSocket } from '../types';
 const {
   NotFoundError,
   ForbiddenError,
@@ -13,10 +13,12 @@ const { generateInviteToken } = require('../utils/crypto');
 class InviteService {
   store: DataStore;
   broadcast: Broadcast;
+  getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null;
 
-  constructor(store, broadcast) {
+  constructor(store, broadcast, getPadClients = null) {
     this.store = store;
     this.broadcast = broadcast;
+    this.getPadClients = getPadClients;
   }
 
   async create(userId, maxUses, expiresInHours) {
@@ -71,8 +73,24 @@ class InviteService {
     if (!invite) throw NotFoundError('Token not found');
     if (invite.creatorCode !== userId) throw ForbiddenError('Not your invitation');
     const result = this.store.removeInvitation(token);
+    if (result) this.closeRevokedClients(userId);
     return result;
+  }
+
+  closeRevokedClients(ownerUserId) {
+    const pads = this.store.findAllPads().filter((pad) => pad.ownerUserId === ownerUserId);
+    for (const pad of pads) {
+      const clients = this.getPadClients ? this.getPadClients(pad.id) : undefined;
+      if (!clients) continue;
+      for (const ws of Array.from(clients) as CoMarkWebSocket[]) {
+        if (ws.userId === ownerUserId) continue;
+        if (ws.userId && this.store.hasAccessGrant(ownerUserId, ws.userId)) continue;
+        try {
+          ws.close(4401, 'Access revoked');
+        } catch {}
+      }
+    }
   }
 }
 
-module.exports = InviteService;
+export = InviteService;

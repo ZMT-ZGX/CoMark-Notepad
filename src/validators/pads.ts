@@ -1,7 +1,6 @@
 'use strict';
 
-import type * as zod from 'zod';
-const { z } = require('zod');
+import { z } from 'zod';
 
 const UpdateTextSchema = z.object({
   text: z.string().max(100000),
@@ -11,14 +10,15 @@ const UpdateTextSchema = z.object({
 const SetPasswordSchema = z.object({
   password: z.string().max(1024).nullable(),
   currentPassword: z.string().max(1024).optional(),
+  _wsId: z.string().optional(),
 });
 
 const UnlockSchema = z.object({
   password: z.string().min(1).max(1024),
 });
 
-export type UpdateTextInput = zod.infer<typeof UpdateTextSchema>;
-export type SetPasswordInput = zod.infer<typeof SetPasswordSchema>;
-export type UnlockInput = zod.infer<typeof UnlockSchema>;
+export type UpdateTextInput = z.infer<typeof UpdateTextSchema>;
+export type SetPasswordInput = z.infer<typeof SetPasswordSchema>;
+export type UnlockInput = z.infer<typeof UnlockSchema>;
 
-module.exports = { UpdateTextSchema, SetPasswordSchema, UnlockSchema };
+export { UpdateTextSchema, SetPasswordSchema, UnlockSchema };

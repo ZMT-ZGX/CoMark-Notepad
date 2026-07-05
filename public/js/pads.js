@@ -13,6 +13,7 @@ export function renderPadTabs() {
   function addPadBtn(pad, label) {
     const btn = document.createElement('button');
     btn.className = 'pad-btn' + (pad.id === state.currentPadId ? ' active' : '');
+    btn.dataset.testid = `pad-tab-${pad.id}`;
     if (pad.hasPassword) btn.classList.add('locked');
     btn.textContent = label || pad.id;
     btn.title = pad.hasPassword ? `Pad ${pad.id} (locked)` : `Pad ${pad.id}`;
@@ -57,6 +58,7 @@ export function renderPadTabs() {
   // Add [+] button
   const addBtn = document.createElement('button');
   addBtn.className = 'pad-add-btn';
+  addBtn.dataset.testid = 'new-pad';
   addBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
   addBtn.title = 'New pad';
   addBtn.addEventListener('click', createPad);
@@ -68,13 +70,17 @@ export async function switchPad(padId) {
   // Flush pending text sync for the old pad before switching
   if (state.sendTimeout) {
     clearTimeout(state.sendTimeout);
-    const { sendTextNow } = await import('./ws.js');
+    const { sendTextNow } = await import('./text-sync.js');
     await sendTextNow();
   }
+  const { flushPatchQueue } = await import('./text-sync.js');
+  flushPatchQueue(state.currentPadId); // flush old pad queue if WS open
+
   state.lastTextRequestId = 0;
   state.currentPadId = padId;
   state.textVersion = 0;
   state.pendingRemoteState = null;
+  state.lastSyncedText = '';
   $('#text-input').value = '';
 
   renderPadTabs();
@@ -85,7 +91,7 @@ export async function switchPad(padId) {
   connectWS();
 }
 
-async function createPad() {
+export async function createPad() {
   try {
     const data = await createPadApi();
     const newPad = {
@@ -135,7 +141,7 @@ export async function loadPadContent() {
     if (padId !== state.currentPadId) return;
     const nextVersion = Number.isInteger(data.textVersion) ? data.textVersion : 0;
     // Import text-sync lazily to avoid circular dep at init time
-    const { applyTextState } = await import('./ws.js');
+    const { applyTextState } = await import('./text-sync.js');
     applyTextState(data.text || '', nextVersion);
   } catch (e) {
     console.warn('Failed to load pad content:', e);

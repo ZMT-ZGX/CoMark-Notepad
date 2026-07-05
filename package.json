@@ -19,6 +19,9 @@
     "dev": "tsx src/server.ts",
     "build": "tsc",
     "test": "node --import tsx --test tests/*.test.js",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write 'src/**/*.ts'",
@@ -40,6 +43,7 @@
     "adm-zip": "^0.5.17",
     "better-sqlite3": "^12.11.1",
     "busboy": "^1.6.0",
+    "diff-match-patch": "^1.0.5",
     "express": "^5.0.0",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
@@ -55,6 +59,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.6",
     "@types/node": "^26.1.0",
