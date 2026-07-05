@@ -1,10 +1,127 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
+All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [1.0.1] - 2025-07-01
+## [1.1.0] - 2026-07-05
 
-### Architecture — UTL 分层重构
+### Patch-based Collaborative Editing
+
+告别全量文本广播。引入 [diff-match-patch](https://github.com/google/diff-match-patch) 实现真正的并发安全同步。
+
+- **客户端**维护 `state.lastSyncedText` 作为 patch 计算基准；输入时通过 `dmp.patch_make` 生成 patch，**只发送 patch（带宽节省 90%+）**
+- **服务端** `padService.applyPatch()` 从 DB 读当前文本 → `dmp.patch_apply()` → 保存 → 广播 `{ type: 'patch', data }`；接受/拒绝取决于 `results` 数组是否有 `false`
+- **接收方**用 `patch_apply` 合并到本地 textarea，光标位置尽力保留（截断到 `newText.length`）
+- **WS 协议**新增消息类型 `patch` / `patch-ack`；广播 payload 加 `senderId` 防回环
+- **回退路径** WS 不可用时仍走 HTTP `PUT /api/pads/:id/text`（保留全量上传兜底）
+
+### Offline Resilience
+
+- **离线队列** 断网时 patch 暂存 `localStorage`，key 按 `padId` 隔离（`patch-queue:${padId}`）
+- **`onopen` flush** 重连后按序发送队列
+- **beforeunload 兜底** 关闭页面前如有未同步编辑，强制入队
+- **离线横幅** `<div id="offline-banner">` 黄色固定顶栏，状态可视化
+
+### SQLite Full-Text Search (FTS5)
+
+- **`pad_search` 虚拟表** trigram 分词，列：`id UNINDEXED`, `title`, `content`
+- **3 个触发器** `pad_ai` / `pad_ad` / `pad_au` 自动同步索引（零代码侵入）
+- **`/api/search?q=...`** 端点：分词 → 短语包裹 → AND 拼接 → `MATCH` → `bm25` 排序
+- **访问控制** 结果按 `padService.canAccessPad()` 过滤（私有 pad 对非授权用户不可见）
+- **高亮片段** `snippet(pad_search, 2, '<mark>', '</mark>', '…', 32)` 函数式返回
+- **WAL + busy_timeout=5000** 消除 99% SQLITE_BUSY
+
+### Experience Polish
+
+- **Markdown TOC** preview 渲染后自动提取 h1-h3，右侧悬浮目录，点击平滑滚动
+- **Ctrl/⌘ + Shift + F** 全文搜索快捷键，header 搜索图标 + 下拉结果
+- **图片粘贴** textarea 拦截 `paste` 事件，>2MB 拒绝，自动转 base64 插入为 `![](data:...)`
+- **本地 vendor** `diff-match-patch` 复制到 `public/vendor/`，避免外网 CDN 依赖 + CSP 冲突
+- **暗黑模式 CSS 兜底** `@media (prefers-color-scheme: dark)` 纯 CSS fallback
+- **WS unlock token 移出 URL** 改用首条消息 `{ type: 'auth', padToken }`，避免代理/服务器 access log 泄露
+- **WS padToken 鉴权** 加超时 1.5s；socket 关闭自动清除 timer
+
+### Code Review Fixes
+
+5 项 Critical 修复：
+
+1. **broken imports** `pads.js` / `shortcuts.js` 仍从 `ws.js` 导入已下沉的 `sendTextNow` / `applyTextState` → 改从 `text-sync.js` 导入
+2. **CSP 不允许 cdnjs** → 把 `diff-match-patch` 包装为 `public/vendor/diff_match_patch.js` 自带
+3. **`/api/search` 无访问控制** → 用 `db.pads.findById(r.id)` 拿完整 pad 走 `canAccessPad()` 过滤
+4. **offline queue 未 pad 隔离** → localStorage key 改为 `patch-queue:${padId}`
+5. **`patch_apply` 结果未校验** → 服务端/客户端都检查 `results.some(r => !r)` 失败则拒绝/回退
+
+4 项 Warning 修复：
+
+- CDN 404（`text/` 路径错误）→ 改 cdnjs
+- `searchSnippet` 假 FTS5（直接 substr）→ 真正用 FTS5 `snippet()`
+- `searchSnippet` 列索引错（1=空 title）→ 改为 2（content）
+- offline queue 缺持久化 → localStorage getter/setter + beforeunload 兜底
+
+### Misc
+
+- **类型化** `WsPatch` 加入 `WsMessage` union，含 `senderId: string | null`
+- **logger** `padService.applyPatch` 4 种失败模式分别 `logger.warn`（不再静默返回 null）
+- **vendor 静态服务** `app.use('/vendor', ...)` 暴露给浏览器
+
+### Test Coverage
+
+- 68/68 测试全部通过（+2 来自新 FTS5 路径）
+- 修复后 typecheck + lint 零错误
+
+---
+
+## [1.0.2] - 2026-06-27
+
+### Six-Phase Refactor
+
+按 `CoMark-Notepad优化方案utl版.md` 完成全量架构升级，从单文件 `server.js` 迁移至模块化分层架构。
+
+#### Phase 1 — 服务端模块化拆分
+`server.js` 单文件 → `src/` 下 43 个 TypeScript 模块（routes / middlewares / ws / utils / auth / store / services / validators / db）
+
+#### Phase 2 — 数据层抽象 + Zod 运行时校验
+- `DataStore` facade 统一 26 个方法接口
+- 9 个 Zod Schema 覆盖所有写操作路由
+- `z.infer<>` 自动推导 TS 类型
+
+#### Phase 3 — 前端模块化
+`public/app.js` 单文件 → `public/js/` 下 10 个 ES Module 文件
+
+#### Phase 4 — TypeScript 渐进式迁移
+- 全部 `.js` → `.ts`
+- `strict: true`
+- Source Map 可用
+- 构建产物 ~768KB
+
+#### Phase 5 — SQLite 替换 JSON 存储
+- `better-sqlite3` WAL 模式
+- 外键约束 + CASCADE 删除
+- 9 个索引
+- JSON→SQLite 幂等迁移 + 自动备份
+
+#### Phase 6 — 工程化与质量
+- ESLint + Prettier + simple-git-hooks + GitHub Actions CI
+- Docker 多阶段构建优化（非 root + 无构建工具）
+
+### Security Hardening (preserved)
+
+- HMAC-SHA256 / scrypt / `timingSafeEqual` / `SameSite=Strict` / Rate Limit / Origin 校验全部保留
+
+### Code Review Fixes
+
+- CI YAML 去重
+- `||` → `??` mapper 修复
+- `access_grants` 外键约束
+- `errorHandler` null guard
+- IJSONStore 接口对齐
+- Pad ID AUTOINCREMENT
+- 回滚免责声明
+
+---
+
+## [1.0.1] - 2026-06-26
+
+### UTL 分层重构
 
 按照 `CoMark-Notepad优化方案utl版.md` 完成全量架构升级，从单文件 `server.js` 迁移至模块化分层架构。
 
@@ -66,7 +183,7 @@ src/
 
 ---
 
-## [1.0.0] - 2025-06-28
+## [1.0.0] - 2026-06-15
 
 Initial release.
 

@@ -13,7 +13,6 @@ db.bak.pre-phase5/
 *.png
 converter/.venv/
 CLAUDE.md
-AGENTS.md
 *.bak
 .claude/
 test-results/
