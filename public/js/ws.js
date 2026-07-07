@@ -13,7 +13,7 @@ import { state, $, showToast, getPadToken, upsertLocalFile, removeLocalFile } fr
 import { refreshPads, loadPadContent } from './pads.js';
 import { addFileToList, removeFileFromList, updateFilesEmpty } from './files.js';
 import { showUnlockModal } from './modals.js';
-import { applyRemoteText, applyRemotePatch, applyTextState, flushPatchQueue, showOfflineBanner, hideOfflineBanner } from './text-sync.js';
+import { applyRemoteText, applyRemotePatch, applyPatchNack, applyTextState, flushPatchQueue, showOfflineBanner, hideOfflineBanner } from './text-sync.js';
 
 // --- Identity (kept here because it touches state init + pads + ws) ---
 
@@ -34,32 +34,7 @@ export async function initIdentity() {
   }
   if (state.userCode) {
     try { sessionStorage.setItem('userCode', state.userCode); } catch {}
-    updateUserCodeUI();
   }
-}
-
-function updateUserCodeUI() {
-  const el = $('#user-code-display');
-  if (!el) return;
-  if (state.userCode) {
-    el.textContent = state.userCode;
-    el.parentElement.hidden = false;
-  } else {
-    el.parentElement.hidden = true;
-  }
-}
-
-function copyUserCode() {
-  if (!state.userCode) return;
-  if (!navigator.clipboard) { showToast('Copy not available in this browser context'); return; }
-  navigator.clipboard.writeText(state.userCode).then(
-    () => showToast('User code copied!'),
-    () => showToast('Copy failed')
-  );
-}
-
-export function initIdentityBindings() {
-  $('#copy-user-code-btn').addEventListener('click', copyUserCode);
 }
 
 export async function loadConvertCapabilitiesUI() {
@@ -115,6 +90,14 @@ export function connectWS() {
         break;
       case 'patch-ack':
         if (msg.textVersion) state.textVersion = Math.max(state.textVersion, msg.textVersion);
+        break;
+      case 'patch-nack':
+        if (msg.padId === state.currentPadId) {
+          applyPatchNack(msg.text, msg.textVersion);
+          // Clear pending patch queue — remaining patches were computed against
+          // the old shadow and would all fail against the reset state.
+          state.setPatchQueue([], msg.padId);
+        }
         break;
       case 'patch':
         if (msg.padId === state.currentPadId && msg.senderId !== state.wsId) {

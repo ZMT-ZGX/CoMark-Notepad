@@ -1,6 +1,6 @@
 'use strict';
 
-import type { DataStore, Broadcast, UnlockTokenEntry, CoMarkWebSocket } from '../types';
+import type { DataStore, Broadcast, UnlockTokenEntry, CoMarkWebSocket, Pad, FileInfo } from '../types';
 const path = require('path');
 const fs = require('fs');
 const logger = require('../utils/logger');
@@ -22,11 +22,15 @@ class PadService {
   getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null;
   unlockTokens: Map<string, UnlockTokenEntry>;
   unlockCleanupTimer: ReturnType<typeof setInterval>;
+  // Reuse a single diff-match-patch instance across applyPatch calls to
+  // avoid rebuilding its internal tables on every incoming patch.
+  dmp: any;
 
-  constructor(store, broadcast, getPadClients = null) {
+  constructor(store: DataStore, broadcast: Broadcast, getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null = null) {
     this.store = store;
     this.broadcast = broadcast;
     this.getPadClients = getPadClients;
+    this.dmp = new DiffMatchPatch();
     this.unlockTokens = new Map();
     this.unlockCleanupTimer = setInterval(() => {
       const now = Date.now();
@@ -37,7 +41,7 @@ class PadService {
     this.unlockCleanupTimer.unref?.();
   }
 
-  padMeta(pad) {
+  padMeta(pad: Pad) {
     return {
       id: pad.id,
       hasPassword: !!pad.password,
@@ -46,13 +50,13 @@ class PadService {
     };
   }
 
-  createUnlockToken(padId) {
+  createUnlockToken(padId: number): string {
     const token = generateId() + generateId();
     this.unlockTokens.set(token, { padId, expires: Date.now() + UNLOCK_TOKEN_TTL_MS });
     return token;
   }
 
-  isValidUnlockToken(token, padId) {
+  isValidUnlockToken(token: string | undefined | null, padId: number): boolean {
     if (!token) return false;
     const entry = this.unlockTokens.get(token);
     if (!entry) return false;
@@ -63,11 +67,11 @@ class PadService {
     return entry.padId === padId;
   }
 
-  canAccessPad(userId, pad) {
+  canAccessPad(userId: string | null, pad: Pad): boolean {
     return canAccessPad(userId, pad, this.store.hasAccessGrant.bind(this.store));
   }
 
-  canAccessFile(userId, file) {
+  canAccessFile(userId: string | null, file: FileInfo): boolean {
     return canAccessFile(
       userId,
       file,
@@ -76,15 +80,15 @@ class PadService {
     );
   }
 
-  canManagePad(userId, isAdminUser, pad) {
+  canManagePad(userId: string | null, isAdminUser: boolean, pad: Pad): boolean {
     return canManagePad(userId, isAdminUser, pad);
   }
 
-  getPadById(padId) {
+  getPadById(padId: number): Pad | null {
     return this.store.findPadById(padId) || null;
   }
 
-  async getPad(userId, padId) {
+  async getPad(userId: string | null, padId: number): Promise<Pad> {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
     if (!this.canAccessPad(userId, pad)) {
@@ -93,7 +97,7 @@ class PadService {
     return pad;
   }
 
-  async getState(userId) {
+  async getState(userId: string | null) {
     const hasGrantFn = this.store.hasAccessGrant.bind(this.store);
     const pads = this.store.findAllPads();
     const files = this.store.findAllFiles();
@@ -108,7 +112,11 @@ class PadService {
     };
   }
 
-  async applyPatch(userId, padId, patchText, excludeWsId) {
+  // Returns a result object so callers (ws/index.ts) can distinguish success
+  // from failure and send an appropriate ack/nack to the sender. On failure,
+  // `pad` carries the authoritative server state so the client can reset its
+  // shadow and avoid permanent divergence.
+  async applyPatch(userId: string | null, padId: number, patchText: string, excludeWsId: string | null) {
     const pad = this.store.findPadById(padId);
     if (!pad) {
       logger.warn('applyPatch: pad not found', { padId });
@@ -119,24 +127,24 @@ class PadService {
       return null;
     }
 
-    const dmp = new DiffMatchPatch();
+    const dmp = this.dmp;
     let patches;
     try {
       patches = dmp.patch_fromText(patchText);
     } catch (e) {
       logger.warn('applyPatch: malformed patch', { padId, error: (e as Error).message });
-      return null;
+      return { ok: false, pad };
     }
     const [newText, results] = dmp.patch_apply(patches, pad.text);
     if (!Array.isArray(results) || results.some((r) => !r)) {
       logger.warn('applyPatch: patch_apply failed', { padId, results });
-      return null;
+      return { ok: false, pad };
     }
 
     const updated = this.store.updatePadText(padId, newText);
     if (!updated) {
       logger.warn('applyPatch: updatePadText returned null', { padId });
-      return null;
+      return { ok: false, pad };
     }
 
     this.broadcast.toPad(
@@ -144,10 +152,10 @@ class PadService {
       { type: 'patch', padId, data: patchText, textVersion: updated.textVersion, senderId: excludeWsId || null },
       excludeWsId
     );
-    return updated;
+    return { ok: true, pad: updated };
   }
 
-  async updateText(userId, padId, text, excludeWsId) {
+  async updateText(userId: string | null, padId: number, text: string, excludeWsId: string | null) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
     if (!this.canAccessPad(userId, pad)) throw ForbiddenError('Access denied');
@@ -167,7 +175,7 @@ class PadService {
     return updated;
   }
 
-  async createPad(userId) {
+  async createPad(userId: string | null) {
     const pads = this.store.findAllPads();
     if (pads.length >= MAX_PADS) {
       throw BadRequestError(`Maximum ${MAX_PADS} pads reached`);
@@ -181,13 +189,13 @@ class PadService {
   }
 
   async setPassword(
-    userId,
-    isAdminUser,
-    padId,
-    newPassword,
-    currentPassword,
-    unlockToken,
-    excludeWsId
+    userId: string | null,
+    isAdminUser: boolean,
+    padId: number,
+    newPassword: string | null,
+    currentPassword: string | null,
+    unlockToken: string | null,
+    excludeWsId: string | null
   ) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
@@ -235,7 +243,7 @@ class PadService {
     return { ok: true, hasPassword: !!updated.password, token: newToken };
   }
 
-  async deletePad(userId, isAdminUser, padId) {
+  async deletePad(userId: string | null, isAdminUser: boolean, padId: number) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
 
@@ -251,7 +259,7 @@ class PadService {
     }
 
     // Delete files (both DB rows and disk) BEFORE removing the pad
-    const filesToDelete = this.store.findAllFiles().filter((f) => (f.padId || 1) === padId);
+    const filesToDelete = this.store.findAllFiles().filter((f) => f.padId === padId);
     for (const file of filesToDelete) {
       try {
         fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
@@ -270,7 +278,7 @@ class PadService {
     return { ok: true, deletedFiles: filesToDelete.length };
   }
 
-  async unlockPad(padId, password) {
+  async unlockPad(padId: number, password: string) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
     if (!pad.password) return { ok: true, token: null };

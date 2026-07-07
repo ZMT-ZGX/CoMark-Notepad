@@ -12,20 +12,20 @@ const convertLimiter = rateLimit({
   message: { error: 'Too many convert attempts.' },
 });
 
-function createRouter(convertService, padService) {
+function createRouter(convertService: any, padService: any) {
   const router = express.Router();
-  const convertPadUnlock = requirePadUnlock(padService, (req) => {
+  const convertPadUnlock = requirePadUnlock(padService, (req: any) => {
     const file = convertService.getFileById(req.params.fileId);
     return file ? file.padId : NaN;
   });
 
   // Get conversion capabilities
-  router.get('/capabilities', (req, res) => {
+  router.get('/capabilities', (req: any, res: any) => {
     res.json(convertService.getCapabilities());
   });
 
   // Convert file to Markdown
-  router.post('/:fileId', convertLimiter, checkOrigin, convertPadUnlock, async (req, res, next) => {
+  router.post('/:fileId', convertLimiter, checkOrigin, convertPadUnlock, async (req: any, res: any, next: any) => {
     try {
       const result = await convertService.convert(req.userId, req.params.fileId);
       res.json(result);

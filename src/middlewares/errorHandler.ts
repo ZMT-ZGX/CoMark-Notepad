@@ -5,7 +5,7 @@ const { AppError } = require('../utils/errors');
 const { formatBytes } = require('../utils/file');
 const { MAX_FILE_BYTES } = require('../config');
 
-function errorHandler(err, req, res, next) {
+function errorHandler(err: any, req: any, res: any, next: any): void {
   // 1. If headers already sent, pass to Express default handler
   if (res.headersSent) return next(err);
 

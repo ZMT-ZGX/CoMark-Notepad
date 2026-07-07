@@ -972,14 +972,6 @@ main {
     display: none;
   }
 
-  .user-code-badge {
-    max-width: 120px;
-  }
-
-  .user-code-text {
-    font-size: 0.72rem;
-  }
-
   .pad-tabs {
     order: 3;
     flex-basis: 100%;
@@ -1101,10 +1093,6 @@ main {
 
 .is-mobile .status {
   display: none !important;
-}
-
-.is-mobile .user-code-badge {
-  max-width: 120px;
 }
 
 .is-mobile .pad-tabs {
@@ -1402,47 +1390,6 @@ main {
 
 .modal-btn.danger:hover {
   background: var(--danger-hover);
-}
-
-/* --- User Code Badge --- */
-
-.user-code-badge {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  background: var(--primary-light);
-  border-radius: 8px;
-  padding: 3px 8px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--primary);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.user-code-badge:hover {
-  background: rgba(0, 113, 227, 0.15);
-}
-
-.user-code-text {
-  font-family: var(--font-mono);
-  letter-spacing: 0.03em;
-}
-
-.user-code-copy {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--primary);
-  padding: 2px;
-  display: flex;
-  align-items: center;
-  opacity: 0.7;
-  transition: opacity 0.15s;
-}
-
-.user-code-copy:hover {
-  opacity: 1;
 }
 
 /* --- Invite Button --- */

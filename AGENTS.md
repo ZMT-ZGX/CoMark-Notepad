@@ -42,7 +42,7 @@ collab-notepad/
 │   │   └── diff_match_patch.js   # Patch-based sync library
 │   └── style.css
 ├── convert-worker.js             # Worker thread: file → Markdown
-├── tests/                        # 68 integration tests
+├── tests/                        # 72 integration tests
 │   ├── identity.test.js          # Auth & access control
 │   ├── smoke.test.js             # Core API, WebSocket
 │   ├── convert.test.js           # Worker conversion
@@ -72,7 +72,7 @@ docker compose up -d
 
 ```bash
 npm run typecheck                 # tsc --noEmit
-npm test                          # node --test (68 tests)
+npm test                          # node --test (72 tests)
 npm run lint                      # ESLint
 npm run format                    # Prettier
 npm run test:e2e                  # Playwright (requires build first)
@@ -136,7 +136,7 @@ See `.env.example`. Key vars:
 A change is complete when:
 1. All code changes are saved to files
 2. `npm run typecheck` passes (0 errors)
-3. `npm test` passes with exit code 0 (68/68)
+3. `npm test` passes with exit code 0 (72/72)
 4. `npm run lint` passes with no new warnings
 5. If security-related: verify CSRF, auth, and CSP behavior
 6. If frontend: verify in browser at relevant breakpoints (desktop + mobile)

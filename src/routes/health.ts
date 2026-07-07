@@ -7,11 +7,11 @@ const { getLanIP } = require('../utils/file');
 // Cache LAN IP at module load time — it rarely changes during runtime
 const CACHED_LAN_IP = getLanIP();
 
-function createRouter(db, getServerPort) {
+function createRouter(db: any, getServerPort: (() => number) | null) {
   const router = express.Router();
 
   // Health check (before any auth, for Docker healthcheck)
-  router.get('/health', (req, res) => {
+  router.get('/health', (req: any, res: any) => {
     res.json({
       status: 'ok',
       uptime: process.uptime(),
@@ -21,7 +21,7 @@ function createRouter(db, getServerPort) {
   });
 
   // QR code
-  router.get('/qrcode', async (req, res, next) => {
+  router.get('/qrcode', async (req: any, res: any, next: any) => {
     try {
       const port = getServerPort ? getServerPort() : 8000;
       const url = `http://${CACHED_LAN_IP}:${port}`;

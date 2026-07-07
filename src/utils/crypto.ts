@@ -15,14 +15,14 @@ function generateInviteToken() {
   return crypto.randomBytes(16).toString('base64url'); // 22 chars, 128 bit
 }
 
-function signSessionToken(userId, expiresInDays) {
+function signSessionToken(userId: string, expiresInDays?: number): string {
   const ttl = expiresInDays || SESSION_TOKEN_TTL_DAYS;
   const ts = Math.floor(Date.now() / 1000 + ttl * 86400).toString(36);
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(`${userId}.${ts}`).digest('hex');
   return `${userId}.${ts}.${sig}`;
 }
 
-function verifySessionToken(token) {
+function verifySessionToken(token: string): string | null {
   if (!token || typeof token !== 'string') return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
@@ -38,20 +38,20 @@ function verifySessionToken(token) {
   return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected)) ? userId : null;
 }
 
-function hashPassword(password) {
+function hashPassword(password: string): Promise<string | null> {
   return new Promise((resolve, reject) => {
     if (typeof password !== 'string' || password.length === 0) return resolve(null);
     const pw =
       password.length > MAX_PASSWORD_LENGTH ? password.slice(0, MAX_PASSWORD_LENGTH) : password;
     const salt = crypto.randomBytes(16);
-    crypto.scrypt(pw, salt, 64, (err, derivedKey) => {
+    crypto.scrypt(pw, salt, 64, (err: Error | null, derivedKey: Buffer) => {
       if (err) return reject(err);
       resolve(`scrypt:${salt.toString('hex')}:${derivedKey.toString('hex')}`);
     });
   });
 }
 
-function verifyPassword(password, stored) {
+function verifyPassword(password: string, stored: string): Promise<boolean> {
   return new Promise((resolve) => {
     if (!stored || typeof stored !== 'string' || typeof password !== 'string')
       return resolve(false);
@@ -62,7 +62,7 @@ function verifyPassword(password, stored) {
     try {
       const salt = Buffer.from(parts[1], 'hex');
       const hash = Buffer.from(parts[2], 'hex');
-      crypto.scrypt(pw, salt, 64, (err, derivedKey) => {
+      crypto.scrypt(pw, salt, 64, (err: Error | null, derivedKey: Buffer) => {
         if (err) return resolve(false);
         resolve(crypto.timingSafeEqual(hash, derivedKey));
       });

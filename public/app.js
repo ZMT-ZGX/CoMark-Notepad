@@ -12,7 +12,7 @@ import { loadPadContent, renderPadTabs, refreshPads, updateLockButton, initLockB
 import { initFileSearch, initFileUpload, startTimeLabelUpdater, stopTimeLabelUpdater } from './js/files.js';
 import { initPasswordModal, initUnlockModal } from './js/modals.js';
 import { initInvitation } from './js/invitation.js';
-import { initIdentity, initIdentityBindings, connectWS, loadConvertCapabilitiesUI } from './js/ws.js';
+import { initIdentity, connectWS, loadConvertCapabilitiesUI } from './js/ws.js';
 import { initTextSync } from './js/text-sync.js';
 import { initQR } from './js/qr.js';
 import { initExport, initBeforeUnload } from './js/export.js';
@@ -67,7 +67,6 @@ async function init() {
   initQR();
   initExport();
   initBeforeUnload();
-  initIdentityBindings();
   initShortcuts(hotkeys);
   initGestures();
   initSearch();

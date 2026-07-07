@@ -40,7 +40,7 @@ export interface User {
 
 export interface Invitation {
   token: string;
-  creatorCode: string;
+  creatorCode: string | null;
   maxUses: number;
   useCount: number;
   expiresAt: number | null;
@@ -49,8 +49,8 @@ export interface Invitation {
 
 export interface AccessGrant {
   inviteToken: string;
-  grantorCode: string;
-  granteeCode: string;
+  grantorCode: string | null;
+  granteeCode: string | null;
   grantedAt: number;
 }
 
@@ -80,6 +80,21 @@ export interface WsPatch {
   data: string;
   textVersion: number;
   senderId: string | null;
+}
+
+export interface WsPatchAck {
+  type: 'patch-ack';
+  textVersion: number;
+}
+
+// Server → sender only. Issued when a patch fails to apply (concurrent
+// conflict or malformed data). Carries the authoritative text so the client
+// can reset its shadow and avoid permanent divergence.
+export interface WsPatchNack {
+  type: 'patch-nack';
+  padId: number;
+  text: string;
+  textVersion: number;
 }
 
 export interface WsFileAdded {
@@ -124,6 +139,8 @@ export interface WsHello {
 export type WsMessage =
   | WsTextUpdate
   | WsPatch
+  | WsPatchAck
+  | WsPatchNack
   | WsFileAdded
   | WsFileDeleted
   | WsPadCreated
@@ -156,6 +173,9 @@ export interface CoMarkWebSocket extends WebSocket {
   userId: string | null;
   ipAddress: string;
   isAlive: boolean;
+  // Per-connection patch rate-limit state (fixed window). See ws/index.ts.
+  patchWindowStart: number;
+  patchCount: number;
 }
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -165,6 +185,7 @@ export interface AppConfig {
   DATA_DIR: string;
   FILES_DIR: string;
   STORE_FILE: string;
+  SQLITE_FILE: string;
   MAX_FILE_BYTES: number;
   JSON_BODY_LIMIT: number;
   HEARTBEAT_INTERVAL_MS: number;
@@ -178,6 +199,8 @@ export interface AppConfig {
   ADMIN_TOKEN: string | null;
   MAX_WS_CONNECTIONS: number;
   MAX_WS_CONNECTIONS_PER_IP: number;
+  WS_PATCH_WINDOW_MS: number;
+  MAX_WS_PATCHES_PER_WINDOW: number;
   CONVERTIBLE_EXTS: string[];
   CONVERT_FEATURES: Record<string, boolean>;
   isProduction: boolean;
@@ -219,10 +242,10 @@ export interface DataStore {
   createInvitation(invite: Invitation): Invitation;
   findInvitationByToken(token: string): Invitation | undefined;
   removeInvitation(token: string): { ok: boolean; revokedGrants: number } | false;
-  hasAccessGrant(grantor: string, grantee: string): boolean;
+  hasAccessGrant(grantor: string | null, grantee: string | null): boolean;
   addAccessGrant(grant: AccessGrant): void;
-  listInvitationsByCreator(code: string): Invitation[];
-  listGrantsByGrantee(code: string): AccessGrant[];
+  listInvitationsByCreator(code: string | null): Invitation[];
+  listGrantsByGrantee(code: string | null): AccessGrant[];
 
   // Persistence
   save(): void;
@@ -248,7 +271,7 @@ export interface IJSONStore {
 // ── Broadcast ───────────────────────────────────────────────────────
 
 export interface Broadcast {
-  toPad(padId: number, data: WsMessage, excludeWsId?: string): void;
+  toPad(padId: number, data: WsMessage, excludeWsId?: string | null): void;
   toAll(data: WsMessage): void;
 }
 

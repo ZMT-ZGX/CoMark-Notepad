@@ -84,7 +84,7 @@ async function start() {
   fileTtlTimer.unref?.();
 
   // --- Graceful shutdown ---
-  function gracefulShutdown(signal) {
+  function gracefulShutdown(signal: string) {
     logger.info(`${signal} received, shutting down...`);
     clearInterval(heartbeatTimer);
     clearInterval(fileTtlTimer);

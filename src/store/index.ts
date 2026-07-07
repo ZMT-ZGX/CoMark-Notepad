@@ -21,14 +21,16 @@
  *  Meta:         rawStore · FILES_DIR
  */
 
-function createDataStore(db) {
+import type { DataStore } from '../types';
+
+function createDataStore(db: any): DataStore {
   return {
     // ── Raw access (init / migration / shutdown only) ──────────────
     rawStore: db.store,
     FILES_DIR: db.FILES_DIR,
 
     // ── Pad ────────────────────────────────────────────────────────
-    findPadById(id) {
+    findPadById(id: number) {
       return db.pads.findById(id);
     },
 
@@ -36,28 +38,28 @@ function createDataStore(db) {
       return db.pads.findAll();
     },
 
-    padExists(id) {
+    padExists(id: number) {
       return !!db.pads.findById(id);
     },
 
-    createPad(pad) {
+    createPad(pad: any) {
       return db.pads.create(pad);
     },
 
-    updatePadText(id, text) {
+    updatePadText(id: number, text: string) {
       return db.pads.updateText(id, text);
     },
 
-    updatePadPassword(id, hash) {
+    updatePadPassword(id: number, hash: string | null) {
       return db.pads.updatePassword(id, hash);
     },
 
-    removePad(id) {
+    removePad(id: number) {
       return db.pads.remove(id);
     },
 
     // ── File ───────────────────────────────────────────────────────
-    findFileById(id) {
+    findFileById(id: string) {
       return db.files.findById(id);
     },
 
@@ -65,61 +67,61 @@ function createDataStore(db) {
       return db.files.findAll();
     },
 
-    createFile(info) {
+    createFile(info: any) {
       return db.files.create(info);
     },
 
-    removeFile(id) {
+    removeFile(id: string) {
       return db.files.remove(id);
     },
 
-    removeFilesByPadId(padId) {
+    removeFilesByPadId(padId: number) {
       return db.files.removeByPadId(padId);
     },
 
-    removeFilesMany(ids) {
+    removeFilesMany(ids: string[]) {
       return db.files.removeMany(ids);
     },
 
-    removeExpiredFiles(ttlMs) {
+    removeExpiredFiles(ttlMs: number) {
       return db.files.removeExpired(ttlMs);
     },
 
     // ── User ───────────────────────────────────────────────────────
-    userExists(code) {
+    userExists(code: string) {
       return db.users.exists(code);
     },
 
-    createUser(user) {
+    createUser(user: any) {
       return db.users.create(user);
     },
 
     // ── Invitation ─────────────────────────────────────────────────
-    createInvitation(invite) {
+    createInvitation(invite: any) {
       return db.invitations.create(invite);
     },
 
-    findInvitationByToken(token) {
+    findInvitationByToken(token: string) {
       return db.invitations.findByToken(token);
     },
 
-    removeInvitation(token) {
+    removeInvitation(token: string) {
       return db.invitations.remove(token);
     },
 
-    hasAccessGrant(grantor, grantee) {
+    hasAccessGrant(grantor: string, grantee: string) {
       return db.invitations.hasAccessGrant(grantor, grantee);
     },
 
-    addAccessGrant(grant) {
+    addAccessGrant(grant: any) {
       return db.invitations.addGrant(grant);
     },
 
-    listInvitationsByCreator(code) {
+    listInvitationsByCreator(code: string) {
       return db.invitations.listByCreator(code);
     },
 
-    listGrantsByGrantee(code) {
+    listGrantsByGrantee(code: string) {
       return db.invitations.listGrantsByGrantee(code);
     },
 

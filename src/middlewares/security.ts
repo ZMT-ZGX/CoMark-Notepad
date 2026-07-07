@@ -3,7 +3,7 @@
 // Only truthy when the operator explicitly set this env var (not the localhost default)
 const EXPLICIT_PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || null;
 
-function isPrivateIp(hostname) {
+function isPrivateIp(hostname: string): boolean {
   // Strip IPv6-mapped IPv4 prefix (e.g. ::ffff:192.168.1.1)
   hostname = hostname.replace(/^::ffff:/i, '');
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
@@ -18,7 +18,7 @@ function isPrivateIp(hostname) {
   return false;
 }
 
-function isAllowedOrigin(origin) {
+function isAllowedOrigin(origin: string | undefined | null): boolean {
   if (!origin) return true;
   if (origin === 'null') return false;
   if (EXPLICIT_PUBLIC_ORIGIN) {
@@ -32,7 +32,7 @@ function isAllowedOrigin(origin) {
   return false;
 }
 
-function extractOriginFromReferer(referer) {
+function extractOriginFromReferer(referer: string | undefined): string | null {
   if (!referer) return null;
   try {
     return new URL(referer).origin;
@@ -41,7 +41,7 @@ function extractOriginFromReferer(referer) {
   }
 }
 
-function checkOrigin(req, res, next) {
+function checkOrigin(req: any, res: any, next: any): void {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
     return next();
   }
@@ -62,7 +62,7 @@ function checkOrigin(req, res, next) {
  * @param {object} padService - PadService instance
  * @param {function} [padIdResolver] - (req) => number. Defaults to Number(req.params.id)
  */
-function requirePadUnlock(padService, padIdResolver) {
+function requirePadUnlock(padService: any, padIdResolver?: (req: any) => number): (req: any, res: any, next: any) => void {
   return (req, res, next) => {
     const padId = padIdResolver ? padIdResolver(req) : Number(req.params.id);
     if (!Number.isInteger(padId) || padId <= 0) return next(); // let route handle validation

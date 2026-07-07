@@ -2,18 +2,20 @@
 
 const sqlite = require('./sqlite');
 
-function findById(id) {
+import type { FileInfo } from '../types';
+
+function findById(id: string): FileInfo | undefined {
   const db = sqlite.getDb();
   const row = db.prepare('SELECT * FROM files WHERE id = ?').get(id);
   return row ? rowToFile(row) : undefined;
 }
 
-function findAll() {
+function findAll(): FileInfo[] {
   const db = sqlite.getDb();
   return db.prepare('SELECT * FROM files ORDER BY created_at DESC').all().map(rowToFile);
 }
 
-function create(fileInfo) {
+function create(fileInfo: FileInfo): FileInfo {
   const db = sqlite.getDb();
   db.prepare(
     'INSERT INTO files (id, filename, original_name, size, mime_type, created_at, owner_user_id, pad_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -25,43 +27,43 @@ function create(fileInfo) {
     fileInfo.mimeType,
     fileInfo.createdAt || Date.now(),
     fileInfo.ownerUserId || null,
-    fileInfo.padId || 1
+    fileInfo.padId ?? 1
   );
   return fileInfo;
 }
 
-function remove(id) {
+function remove(id: string): void {
   const db = sqlite.getDb();
   db.prepare('DELETE FROM files WHERE id = ?').run(id);
 }
 
-function removeByPadId(padId) {
+function removeByPadId(padId: number): void {
   const db = sqlite.getDb();
   db.prepare('DELETE FROM files WHERE pad_id = ?').run(padId);
 }
 
-function removeMany(ids) {
+function removeMany(ids: string[]): void {
   if (!ids || ids.length === 0) return;
   const db = sqlite.getDb();
   const placeholders = ids.map(() => '?').join(',');
   db.prepare(`DELETE FROM files WHERE id IN (${placeholders})`).run(...ids);
 }
 
-function findExpired(ttlMs) {
+function findExpired(ttlMs: number): FileInfo[] {
   const db = sqlite.getDb();
   const cutoff = Date.now() - ttlMs;
   return db.prepare('SELECT * FROM files WHERE created_at < ?').all(cutoff).map(rowToFile);
 }
 
-function removeExpired(ttlMs) {
+function removeExpired(ttlMs: number): FileInfo[] {
   const expired = findExpired(ttlMs);
   if (expired.length === 0) return [];
-  const expiredIds = expired.map((f) => f.id);
+  const expiredIds = expired.map((f: FileInfo) => f.id);
   removeMany(expiredIds);
   return expired;
 }
 
-function rowToFile(row) {
+function rowToFile(row: any): FileInfo {
   return {
     id: row.id,
     filename: row.filename,

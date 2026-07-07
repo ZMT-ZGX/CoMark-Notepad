@@ -15,13 +15,13 @@ class InviteService {
   broadcast: Broadcast;
   getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null;
 
-  constructor(store, broadcast, getPadClients = null) {
+  constructor(store: DataStore, broadcast: Broadcast, getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null = null) {
     this.store = store;
     this.broadcast = broadcast;
     this.getPadClients = getPadClients;
   }
 
-  async create(userId, maxUses, expiresInHours) {
+  async create(userId: string | null, maxUses: number, expiresInHours: number) {
     const token = generateInviteToken();
     const invite = {
       token,
@@ -35,7 +35,7 @@ class InviteService {
     return { token, maxUses, expiresInHours: expiresInHours || null };
   }
 
-  async redeem(userId, token) {
+  async redeem(userId: string | null, token: string) {
     const invite = this.store.findInvitationByToken(token);
     if (!invite) throw NotFoundError('Invalid invitation token');
     if (invite.expiresAt && Date.now() > invite.expiresAt) {
@@ -51,24 +51,32 @@ class InviteService {
       throw ConflictError('Already have access from this inviter');
     }
 
-    this.store.addAccessGrant({
-      inviteToken: token,
-      grantorCode: invite.creatorCode,
-      granteeCode: userId,
-      grantedAt: Date.now(),
-    });
-    // Note: useCount is incremented atomically by db/invitations.addGrant via SQL UPDATE
+    try {
+      this.store.addAccessGrant({
+        inviteToken: token,
+        grantorCode: invite.creatorCode,
+        granteeCode: userId,
+        grantedAt: Date.now(),
+      });
+    } catch (e) {
+      // addGrant throws INVITE_LIMIT_REACHED if the atomic increment hit the
+      // max_uses cap; surface it as a clean "fully redeemed" error.
+      if ((e as Error).message === 'INVITE_LIMIT_REACHED') {
+        throw GoneError('Invitation fully redeemed');
+      }
+      throw e;
+    }
     return { ok: true, grantorCode: invite.creatorCode };
   }
 
-  async list(userId) {
+  async list(userId: string | null) {
     return {
       created: this.store.listInvitationsByCreator(userId),
       received: this.store.listGrantsByGrantee(userId),
     };
   }
 
-  async delete(userId, token) {
+  async delete(userId: string | null, token: string) {
     const invite = this.store.findInvitationByToken(token);
     if (!invite) throw NotFoundError('Token not found');
     if (invite.creatorCode !== userId) throw ForbiddenError('Not your invitation');
@@ -77,7 +85,7 @@ class InviteService {
     return result;
   }
 
-  closeRevokedClients(ownerUserId) {
+  closeRevokedClients(ownerUserId: string | null) {
     const pads = this.store.findAllPads().filter((pad) => pad.ownerUserId === ownerUserId);
     for (const pad of pads) {
       const clients = this.getPadClients ? this.getPadClients(pad.id) : undefined;

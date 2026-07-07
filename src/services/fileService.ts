@@ -1,6 +1,6 @@
 'use strict';
 
-import type { DataStore, Broadcast } from '../types';
+import type { DataStore, Broadcast, FileInfo, Pad } from '../types';
 const path = require('path');
 const fs = require('fs');
 const Busboy = require('busboy');
@@ -21,21 +21,21 @@ class FileService {
   broadcast: Broadcast;
   padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null;
 
-  constructor(store, broadcast, padService) {
+  constructor(store: DataStore, broadcast: Broadcast, padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null) {
     this.store = store;
     this.broadcast = broadcast;
     this.padService = padService || null;
   }
 
-  _hasAccessGrant(grantor, grantee) {
+  _hasAccessGrant(grantor: string | null, grantee: string | null): boolean {
     return this.store.hasAccessGrant(grantor, grantee);
   }
 
-  canAccessPad(userId, pad) {
+  canAccessPad(userId: string | null, pad: Pad): boolean {
     return canAccessPad(userId, pad, this._hasAccessGrant.bind(this));
   }
 
-  canAccessFile(userId, file) {
+  canAccessFile(userId: string | null, file: FileInfo): boolean {
     return authCanAccessFile(
       userId,
       file,
@@ -44,21 +44,21 @@ class FileService {
     );
   }
 
-  canManagePad(userId, isAdminUser, pad) {
+  canManagePad(userId: string | null, isAdminUser: boolean, pad: Pad): boolean {
     return canManagePad(userId, isAdminUser, pad);
   }
 
-  getFileById(fileId) {
+  getFileById(fileId: string): FileInfo | null {
     return this.store.findFileById(fileId) || null;
   }
 
-  getPadForFileById(fileId) {
+  getPadForFileById(fileId: string): Pad | null {
     const file = this.store.findFileById(fileId);
     if (!file) return null;
-    return this.store.findPadById(file.padId || 1) || null;
+    return this.store.findPadById(file.padId ?? 1) || null;
   }
 
-  async upload(req, res) {
+  async upload(req: any, res: any) {
     const contentType = req.headers['content-type'] || '';
     if (!contentType.startsWith('multipart/form-data')) {
       throw BadRequestError('multipart/form-data required');
@@ -101,7 +101,7 @@ class FileService {
       filePath = null;
     };
 
-    const fail = (status, error) => {
+    const fail = (status: number, error: string) => {
       if (finished || res.headersSent) return;
       finished = true;
       cleanupPartialFile();
@@ -115,7 +115,7 @@ class FileService {
       }
     });
 
-    busboy.on('field', (name, value) => {
+    busboy.on('field', (name: string, value: string) => {
       if (name === '_wsId') excludeWsId = String(value || '');
       if (name === 'padId') padIdField = Number(value) || null;
     });
@@ -123,7 +123,7 @@ class FileService {
     busboy.on('filesLimit', () => fail(400, 'Only one file allowed'));
     busboy.on('partsLimit', () => fail(400, 'Too many form parts'));
 
-    busboy.on('file', (name, file, info) => {
+    busboy.on('file', (name: string, file: any, info: { filename: string; mimeType: string; encoding: string }) => {
       if (name !== 'file' || fileSeen) {
         file.resume();
         return;
@@ -176,7 +176,7 @@ class FileService {
       });
 
       file.pipe(writeStream);
-      file.on('data', (chunk) => {
+      file.on('data', (chunk: Buffer) => {
         if (fileInfo) fileInfo.size += chunk.length;
       });
     });
@@ -240,11 +240,11 @@ class FileService {
     req.pipe(busboy);
   }
 
-  async downloadFile(userId, fileId, unlockToken) {
+  async downloadFile(userId: string | null, fileId: string, unlockToken: string | undefined): Promise<{ file: FileInfo; filepath: string }> {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
     if (!this.canAccessFile(userId, file)) throw NotFoundError('File not found');
-    const pad = this.store.findPadById(file.padId || 1);
+    const pad = this.store.findPadById(file.padId ?? 1);
     if (
       pad?.password &&
       (!this.padService || !this.padService.isValidUnlockToken(unlockToken, pad.id))
@@ -255,11 +255,11 @@ class FileService {
     return { file, filepath };
   }
 
-  async deleteFile(userId, isAdminUser, fileId, excludeWsId) {
+  async deleteFile(userId: string | null, isAdminUser: boolean, fileId: string, excludeWsId: string | undefined) {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
 
-    const pad = this.store.findPadById(file.padId || 1);
+    const pad = this.store.findPadById(file.padId ?? 1);
     if (!pad) throw NotFoundError('Pad not found');
 
     // Permission check
@@ -279,11 +279,11 @@ class FileService {
     try {
       fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
     } catch {}
-    this.broadcast.toPad(file.padId || 1, { type: 'file-deleted', padId: file.padId || 1, fileId }, excludeWsId);
+    this.broadcast.toPad(file.padId ?? 1, { type: 'file-deleted', padId: file.padId ?? 1, fileId }, excludeWsId);
     return { ok: true };
   }
 
-  async clearFiles(userId, isAdminUser, padId, excludeWsId) {
+  async clearFiles(userId: string | null, isAdminUser: boolean, padId: number, excludeWsId: string | undefined) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
 
@@ -291,7 +291,7 @@ class FileService {
       throw ForbiddenError('Access denied');
     }
 
-    const toDelete = this.store.findAllFiles().filter((f) => (f.padId || 1) === padId);
+    const toDelete = this.store.findAllFiles().filter((f) => f.padId === padId);
     for (const file of toDelete) {
       try {
         fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));

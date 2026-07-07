@@ -5,7 +5,7 @@ const fs = require('fs');
 const logger = require('../utils/logger');
 const { SQLITE_FILE, STORE_FILE } = require('../config');
 
-let db;
+let db: any;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pads (
@@ -89,7 +89,7 @@ END;
 /**
  * Open SQLite database, create schema, migrate from store.json if needed.
  */
-function open() {
+function open(): any {
   db = new Database(SQLITE_FILE);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
@@ -133,7 +133,7 @@ function migrateFromJSON() {
     return;
   }
 
-  const migrateInsert = db.transaction((rawData) => {
+  const migrateInsert = db.transaction((rawData: any) => {
     // Handle old single-pad format: { text, textVersion } → { pads: [{ ... }] }
     let data = rawData;
     if (!data.pads && data.text !== undefined) {
@@ -192,7 +192,7 @@ function migrateFromJSON() {
           f.mimeType,
           f.createdAt || Date.now(),
           f.ownerUserId || null,
-          f.padId || 1
+          f.padId ?? 1
         );
       }
     }
@@ -259,7 +259,7 @@ function seedDefaultPad() {
 /**
  * Close the database connection.
  */
-function close() {
+function close(): void {
   if (db) {
     db.close();
     db = null;
@@ -270,7 +270,7 @@ function close() {
 /**
  * Get the raw database handle.
  */
-function getDb() {
+function getDb(): any {
   return db;
 }
 
@@ -283,7 +283,7 @@ function getStoreSnapshot() {
   const users = db.prepare('SELECT * FROM users').all().map(rowToUser);
   const inviteTokens = db.prepare('SELECT * FROM invitations').all().map(rowToInvitation);
   const accessGrants = db.prepare('SELECT * FROM access_grants').all().map(rowToGrant);
-  const revokedTokens = {};
+  const revokedTokens: Record<string, number> = {};
   for (const row of db.prepare('SELECT token, expires_at FROM revoked_tokens').all()) {
     revokedTokens[row.token] = row.expires_at;
   }
@@ -292,7 +292,7 @@ function getStoreSnapshot() {
 
 // ── Row → Object mappers ──────────────────────────────────────────
 
-function rowToPad(row) {
+function rowToPad(row: any) {
   return {
     id: row.id,
     text: row.text,
@@ -304,7 +304,7 @@ function rowToPad(row) {
   };
 }
 
-function rowToFile(row) {
+function rowToFile(row: any) {
   return {
     id: row.id,
     filename: row.filename,
@@ -317,11 +317,11 @@ function rowToFile(row) {
   };
 }
 
-function rowToUser(row) {
+function rowToUser(row: any) {
   return { code: row.code, createdAt: row.created_at };
 }
 
-function rowToInvitation(row) {
+function rowToInvitation(row: any) {
   return {
     token: row.token,
     creatorCode: row.creator_code,
@@ -332,7 +332,7 @@ function rowToInvitation(row) {
   };
 }
 
-function rowToGrant(row) {
+function rowToGrant(row: any) {
   return {
     inviteToken: row.invite_token,
     grantorCode: row.grantor_code,

@@ -50,7 +50,7 @@
 | 运行时校验 | Zod v4 |
 | 安全 | Helmet CSP · express-rate-limit · timing-safe 比较 |
 | 前端 | 原生 HTML / CSS / ES Modules（零框架）· hotkeys-js · AlloyFinger |
-| 测试 | Node.js test runner（68 个集成测试）|
+| 测试 | Node.js test runner（72 个集成测试）|
 | 工程化 | ESLint + Prettier + simple-git-hooks + GitHub Actions CI |
 
 ## 快速开始
@@ -64,7 +64,7 @@ npm run dev
 
 启动后访问：
 - 本机：`http://localhost:8000`
-- 局域网设备：`http://<本机IP>:8000`（终端会打印二维码）
+- 局域网设备：`http://<本机IP>:8000`（网页端会生成二维码）
 
 ### 生产部署
 
@@ -181,7 +181,7 @@ docker compose logs -f
 ## 测试
 
 ```bash
-npm test                  # 全部测试（68 个）
+npm test                  # 全部测试（72 个）
 npm run typecheck         # TypeScript 严格检查
 npm run lint              # ESLint
 npm run test:e2e          # Playwright E2E（需先 npm run build）
@@ -262,6 +262,22 @@ collab-notepad/
 - **本地 vendor** — `diff-match-patch` 复制到 `public/vendor/`，避免外网依赖 + CSP 冲突
 - **类型化** — `WsPatch` 加入 `WsMessage` union；`padService` 加 `applyPatch` 方法
 - **代码审查修复** — 修复 5 项 Critical（broken imports / CSP / 访问控制 / pad 隔离 / patch_apply 校验）+ 4 项 Warning（CDN 404、searchSnippet 假 FTS5、searchSnippet 列索引、缺离线持久化）
+
+### v1.1.1 (2026-07-07)
+
+**代码审查加固（10 项）**
+
+- **`padId` 兜底修正** — 删除/清理文件过滤改严格相等；默认查找 `|| 1` → `?? 1`
+- **`DiffMatchPatch` 单例** — 前后端分别提升为 `padService` 类字段与 `getDmp()` 模块单例，减少 GC 压力
+- **发送端影子时序** — `text-sync.js` 在 `ws.send()` 之后才更新 `lastSyncedText`，避免断连分叉
+- **搜索高亮修复** — 服务端 `<mark>` 片段按 HTML 渲染，否则转义文本（修复失效且无 XSS）
+- **WebSocket `maxPayload`** — 设置 2MB 上限，防超大帧耗尽内存
+- **CSP 收紧** — `scriptSrc` 移除未使用的 `cdn.jsdelivr.net`
+- **`/api/auth/verify` 补 `checkOrigin`** — 与 `/register` / `/logout` 一致
+- **邀请 `maxUses` 原子强制** — 事务内「先条件递增再插授权」，超限额回滚并避免 orphan 授权
+- **测试 72/72 全通过**（较 1.1.0 新增 4 个用例）
+
+> 注：审查报告的首项「`::root` 拼写错误」经核验为误报，样式本就正常。
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 

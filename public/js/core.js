@@ -85,7 +85,7 @@ export function removeLocalFile(fileId) {
 }
 
 export function getFilesForPad(padId) {
-  return state.allFiles.filter(f => (f.padId || 1) === padId);
+  return state.allFiles.filter(f => f.padId === padId);
 }
 
 // --- Convertible Extensions ---

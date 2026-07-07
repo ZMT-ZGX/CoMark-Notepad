@@ -6,6 +6,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { setTimeout: delay } = require('node:timers/promises');
 const WebSocket = require('ws');
+const DiffMatchPatch = require('diff-match-patch');
 
 const PROJECT_DIR = path.resolve(__dirname, '..');
 
@@ -852,6 +853,144 @@ test('deleting invitation revokes associated access grants', async () => {
       headers: { Cookie: cookieB },
     });
     assert.equal(listAfter.body.received.length, 0);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+// --- Patch sync integration tests ---
+
+function makePatch(oldText, newText) {
+  const dmp = new DiffMatchPatch();
+  const patches = dmp.patch_make(oldText, newText);
+  return dmp.patch_toText(patches);
+}
+
+test('patch messages sync between clients on the same pad', async () => {
+  const server = await startServer();
+  try {
+    // Seed initial text so both clients share a known shadow
+    await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
+      body: JSON.stringify({ text: 'Hello' }),
+    });
+
+    const a = await createReadyClient(server.wsUrl, 1);
+    const b = await createReadyClient(server.wsUrl, 1);
+    a.drain(); b.drain();
+
+    // Client A sends a valid patch: "Hello" → "Hello World"
+    const patchText = makePatch('Hello', 'Hello World');
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: patchText }));
+
+    // A should receive patch-ack
+    const ack = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
+    assert.ok(ack.textVersion > 0, 'patch-ack should carry a positive textVersion');
+
+    // B should receive the broadcast patch
+    const remote = await waitForMessage(b, (msg) => msg.type === 'patch', 1500);
+    assert.equal(remote.padId, 1);
+    assert.equal(remote.data, patchText);
+
+    // Server text should reflect the change
+    const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
+    assert.equal(pad.text, 'Hello World');
+
+    await closeClient(a);
+    await closeClient(b);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('malformed patch triggers patch-nack with server text', async () => {
+  const server = await startServer();
+  try {
+    const a = await createReadyClient(server.wsUrl, 1);
+    a.drain();
+
+    // Send garbage that is not a valid patch
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: '@@@ invalid @@@' }));
+
+    // Server should respond with patch-nack (not patch-ack)
+    const nack = await waitForMessage(a, (msg) => msg.type === 'patch-nack', 1500);
+    assert.equal(nack.type, 'patch-nack');
+    assert.equal(nack.padId, 1);
+    assert.ok(typeof nack.text === 'string', 'nack should carry text');
+    assert.ok(typeof nack.textVersion === 'number', 'nack should carry textVersion');
+
+    // Verify nack text matches server state
+    const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
+    assert.equal(nack.text, pad.text);
+    assert.equal(nack.textVersion, pad.textVersion);
+
+    await closeClient(a);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('concurrent patches at same position both succeed', async () => {
+  const server = await startServer();
+  try {
+    // Seed text so both clients share shadow "Hello"
+    await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
+      body: JSON.stringify({ text: 'Hello' }),
+    });
+
+    const a = await createReadyClient(server.wsUrl, 1);
+    const b = await createReadyClient(server.wsUrl, 1);
+    a.drain(); b.drain();
+
+    // Both send patches concurrently based on shadow "Hello"
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('Hello', 'HelloAAA') }));
+    b.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('Hello', 'HelloBBB') }));
+
+    // Both should receive patch-ack (dmp fuzzy-match tolerates drift)
+    const ackA = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
+    const ackB = await waitForMessage(b, (msg) => msg.type === 'patch-ack', 1500);
+    assert.ok(ackA.textVersion > 0);
+    assert.ok(ackB.textVersion > 0);
+
+    // Server text should contain both edits
+    const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
+    assert.ok(pad.text.includes('AAA'), 'server text should contain A edit');
+    assert.ok(pad.text.includes('BBB'), 'server text should contain B edit');
+
+    await closeClient(a);
+    await closeClient(b);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('WS patch rate limit closes connection with code 4001', async () => {
+  // Override rate-limit config via env vars so the test doesn't need 120+ messages
+  const server = await startServer({
+    MAX_WS_PATCHES_PER_WINDOW: '5',
+    WS_PATCH_WINDOW_MS: '60000',
+  });
+  try {
+    const a = await createReadyClient(server.wsUrl, 1);
+    a.drain();
+
+    // Send more patches than the per-window limit (5)
+    for (let i = 0; i < 8; i++) {
+      a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('', `text${i}`) }));
+    }
+
+    // Connection should be closed by server with code 4001
+    const closeEvent = await new Promise((resolve) => {
+      a.socket.once('close', (code, reason) => resolve({ code, reason: String(reason) }));
+      // Fallback timeout — if no close within 3s, fail
+      setTimeout(() => resolve({ code: -1, reason: 'timeout' }), 3000);
+    });
+    assert.equal(closeEvent.code, 4001, `Expected close code 4001, got ${closeEvent.code}`);
+
+    await closeClient(a);
   } finally {
     await stopServer(server);
   }

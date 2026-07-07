@@ -28,18 +28,18 @@ const unlockLimiter = rateLimit({
 const publicPadCreateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
-  skip: (req) => !!req.userId,
+  skip: (req: any) => !!req.userId,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many public pad creations.' },
 });
 
-function createRouter(padService, getPadClients) {
+function createRouter(padService: any, getPadClients: (padId: number) => Set<CoMarkWebSocket> | undefined) {
   const router = express.Router();
   const padUnlock = requirePadUnlock(padService);
 
   // Get pad content
-  router.get('/:id', padUnlock, async (req, res, next) => {
+  router.get('/:id', padUnlock, async (req: any, res: any, next: any) => {
     try {
       const padId = Number(req.params.id);
       if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
@@ -56,7 +56,7 @@ function createRouter(padService, getPadClients) {
   });
 
   // Update pad text (PUT for normal sync; POST alias for navigator.sendBeacon)
-  const updatePadText = async (req, res, next) => {
+  const updatePadText = async (req: any, res: any, next: any) => {
     try {
       const padId = Number(req.params.id);
       if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
@@ -86,7 +86,7 @@ function createRouter(padService, getPadClients) {
   );
 
   // Create new pad
-  router.post('/', publicPadCreateLimiter, checkOrigin, async (req, res, next) => {
+  router.post('/', publicPadCreateLimiter, checkOrigin, async (req: any, res: any, next: any) => {
     try {
       const pad = await padService.createPad(req.userId);
       res.json({
@@ -107,7 +107,7 @@ function createRouter(padService, getPadClients) {
     unlockLimiter,
     checkOrigin,
     validate(SetPasswordSchema),
-    async (req, res, next) => {
+    async (req: any, res: any, next: any) => {
       try {
         const padId = Number(req.params.id);
         if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
@@ -130,7 +130,7 @@ function createRouter(padService, getPadClients) {
   );
 
   // Delete pad (owner/admin can delete even without unlock token)
-  router.delete('/:id', checkOrigin, async (req, res, next) => {
+  router.delete('/:id', checkOrigin, async (req: any, res: any, next: any) => {
     try {
       const padId = Number(req.params.id);
       if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
@@ -159,7 +159,7 @@ function createRouter(padService, getPadClients) {
     unlockLimiter,
     checkOrigin,
     validate(UnlockSchema),
-    async (req, res, next) => {
+    async (req: any, res: any, next: any) => {
       try {
         const padId = Number(req.params.id);
         if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');

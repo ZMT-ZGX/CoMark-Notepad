@@ -11,7 +11,7 @@
 
 const revokedTokens = new Map() as Map<string, number>; // token -> expiresAt (epoch seconds)
 
-function set(token, expiresAtEpoch) {
+function set(token: string, expiresAtEpoch: number): void {
   revokedTokens.set(token, expiresAtEpoch);
   // Persist to SQLite immediately
   try {
@@ -26,15 +26,15 @@ function set(token, expiresAtEpoch) {
   } catch {}
 }
 
-function has(token) {
+function has(token: string): boolean {
   return revokedTokens.has(token);
 }
 
-function get(token) {
+function get(token: string): number | undefined {
   return revokedTokens.get(token);
 }
 
-function del(token) {
+function del(token: string): void {
   revokedTokens.delete(token);
   try {
     const sqlite = require('./sqlite');
@@ -95,7 +95,7 @@ function restoreFromSQLite() {
  * Legacy compat: restore from store data (kept for backward compat).
  * With SQLite, use restoreFromSQLite() instead.
  */
-function restoreFromStoreData(storeData) {
+function restoreFromStoreData(storeData: any): void {
   // Try SQLite first
   try {
     const sqlite = require('./sqlite');

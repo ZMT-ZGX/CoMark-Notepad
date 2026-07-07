@@ -19,13 +19,13 @@ const redeemLimiter = rateLimit({
 const inviteCreateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
-  keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip || req.socket.remoteAddress || ''),
+  keyGenerator: (req: any) => req.userId || ipKeyGenerator(req.ip || req.socket.remoteAddress || ''),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many invitations created.' },
 });
 
-function createRouter(inviteService) {
+function createRouter(inviteService: any) {
   const router = express.Router();
 
   // Create invitation
@@ -34,7 +34,7 @@ function createRouter(inviteService) {
     inviteCreateLimiter,
     checkOrigin,
     validate(CreateInvitationSchema),
-    async (req, res, next) => {
+    async (req: any, res: any, next: any) => {
       try {
         if (!req.userId) throw UnauthorizedError('Authentication required');
         const { maxUses, expiresInHours = 0 } = req.body;
@@ -53,7 +53,7 @@ function createRouter(inviteService) {
     redeemLimiter,
     checkOrigin,
     validate(RedeemInvitationSchema),
-    async (req, res, next) => {
+    async (req: any, res: any, next: any) => {
       try {
         if (!req.userId) throw UnauthorizedError('Authentication required');
         const { token } = req.body;
@@ -67,7 +67,7 @@ function createRouter(inviteService) {
   );
 
   // List invitations
-  router.get('/', async (req, res, next) => {
+  router.get('/', async (req: any, res: any, next: any) => {
     try {
       if (!req.userId) throw UnauthorizedError('Authentication required');
       const result = await inviteService.list(req.userId);
@@ -78,7 +78,7 @@ function createRouter(inviteService) {
   });
 
   // Delete invitation
-  router.delete('/:token', checkOrigin, async (req, res, next) => {
+  router.delete('/:token', checkOrigin, async (req: any, res: any, next: any) => {
     try {
       if (!req.userId) throw UnauthorizedError('Authentication required');
       const result = await inviteService.delete(req.userId, req.params.token);

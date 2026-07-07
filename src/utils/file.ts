@@ -20,7 +20,7 @@ function getLanIP() {
   return 'localhost';
 }
 
-function formatBytes(bytes) {
+function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ['KB', 'MB', 'GB'];
   let value = bytes;
@@ -40,14 +40,14 @@ function downloadBasename(name: string | undefined | null, fallback = 'file') {
   return base.replace(/[\0\r\n]/g, '_') || fallback;
 }
 
-function encodeRFC5987(value) {
+function encodeRFC5987(value: string): string {
   return encodeURIComponent(value).replace(
     /['()*]/g,
     (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()
   );
 }
 
-function contentDisposition(disposition, filename) {
+function contentDisposition(disposition: string, filename: string | undefined | null): string {
   const name = downloadBasename(filename);
   const ascii =
     name

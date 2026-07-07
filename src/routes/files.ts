@@ -17,15 +17,15 @@ const clearFilesLimiter = rateLimit({
   message: { error: 'Too many clear-all attempts.' },
 });
 
-function createRouter(fileService, padService) {
+function createRouter(fileService: any, padService: any) {
   const router = express.Router();
-  const filePadUnlock = requirePadUnlock(padService, (req) => {
+  const filePadUnlock = requirePadUnlock(padService, (req: any) => {
     const f = fileService.getFileById(req.params.id);
     return f ? f.padId : NaN;
   });
 
   // Download file
-  router.get('/:id', async (req, res, next) => {
+  router.get('/:id', async (req: any, res: any, next: any) => {
     try {
       const unlockToken = req.headers['x-pad-token'] || req.query?.padToken;
       const { file, filepath } = await fileService.downloadFile(
@@ -37,7 +37,7 @@ function createRouter(fileService, padService) {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Content-Disposition', contentDisposition('attachment', file.originalName));
       res.type(file.mimeType || 'application/octet-stream');
-      res.sendFile(filepath, (err) => {
+      res.sendFile(filepath, (err: any) => {
         if (err && err.code === 'ENOENT') {
           if (!res.headersSent) res.status(404).json({ error: 'File not found on disk' });
           return;
@@ -57,7 +57,7 @@ function createRouter(fileService, padService) {
     checkOrigin,
     filePadUnlock,
     validate(DeleteFileSchema),
-    async (req, res, next) => {
+    async (req: any, res: any, next: any) => {
       try {
         const excludeWsId = req.body._wsId;
 
@@ -81,14 +81,14 @@ function createRouter(fileService, padService) {
   );
 
   // Clear all files (scoped to current pad)
-  const clearPadUnlock = requirePadUnlock(padService, (req) => Number(req.body?.padId));
+  const clearPadUnlock = requirePadUnlock(padService, (req: any) => Number(req.body?.padId));
   router.delete(
     '/',
     clearFilesLimiter,
     checkOrigin,
     clearPadUnlock,
     validate(ClearFilesSchema),
-    async (req, res, next) => {
+    async (req: any, res: any, next: any) => {
       try {
         const { padId: targetPadId, _wsId: excludeWsId } = req.body;
         const result = await fileService.clearFiles(

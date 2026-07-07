@@ -18,10 +18,10 @@ const registerLimiter = rateLimit({
   message: { error: 'Too many registration attempts.' },
 });
 
-function createRouter(db) {
+function createRouter(db: any) {
   const router = express.Router();
 
-  router.post('/register', registerLimiter, checkOrigin, validate(RegisterSchema), (req, res) => {
+  router.post('/register', registerLimiter, checkOrigin, validate(RegisterSchema), (req: any, res: any) => {
     let code;
     let attempts = 0;
     do {
@@ -47,7 +47,7 @@ function createRouter(db) {
     res.json({ code, token, expiresInDays });
   });
 
-  router.post('/verify', validate(VerifySchema), (req, res) => {
+  router.post('/verify', checkOrigin, validate(VerifySchema), (req: any, res: any) => {
     const { token } = req.body;
     const userId = session.verify(token);
     if (userId && db.users.exists(userId)) {
@@ -57,7 +57,7 @@ function createRouter(db) {
     }
   });
 
-  router.get('/me', (req, res, next) => {
+  router.get('/me', (req: any, res: any, next: any) => {
     try {
       if (!req.userId) throw UnauthorizedError('Not authenticated');
       res.json({ code: req.userId });
@@ -66,7 +66,7 @@ function createRouter(db) {
     }
   });
 
-  router.post('/logout', checkOrigin, (req, res) => {
+  router.post('/logout', checkOrigin, (req: any, res: any) => {
     const { parseCookies } = require('../middlewares/auth');
     const cookies = parseCookies(req.headers.cookie || '');
     const cookieToken = cookies['session_token'];

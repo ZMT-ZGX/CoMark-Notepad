@@ -1,9 +1,11 @@
 'use strict';
 
-const padClients = new Map(); // padId -> Set<ws>
-const wsConnectionsPerIp = new Map(); // tracks active WS connections per IP
+import type { CoMarkWebSocket } from '../types';
 
-function add(ws, meta) {
+const padClients = new Map<number, Set<CoMarkWebSocket>>(); // padId -> Set<ws>
+const wsConnectionsPerIp = new Map<string, number>(); // tracks active WS connections per IP
+
+function add(ws: CoMarkWebSocket, meta: { clientId: string; padId: number; userId: string | null; ipAddress: string }): void {
   ws.clientId = meta.clientId;
   ws.padId = meta.padId;
   ws.userId = meta.userId;
@@ -11,7 +13,7 @@ function add(ws, meta) {
   ws.isAlive = true;
 
   if (!padClients.has(meta.padId)) padClients.set(meta.padId, new Set());
-  padClients.get(meta.padId).add(ws);
+  padClients.get(meta.padId)!.add(ws);
 
   if (meta.ipAddress) {
     const count = wsConnectionsPerIp.get(meta.ipAddress) || 0;
@@ -19,7 +21,7 @@ function add(ws, meta) {
   }
 }
 
-function remove(ws) {
+function remove(ws: CoMarkWebSocket): void {
   const set = padClients.get(ws.padId);
   if (!set || !set.delete(ws)) return;
   if (set.size === 0) padClients.delete(ws.padId);
@@ -31,28 +33,28 @@ function remove(ws) {
   }
 }
 
-function getTotalCount() {
+function getTotalCount(): number {
   let count = 0;
   for (const set of padClients.values()) count += set.size;
   return count;
 }
 
-function getIpCount(ip) {
+function getIpCount(ip: string): number {
   return wsConnectionsPerIp.get(ip) || 0;
 }
 
-function getPadCount(padId) {
+function getPadCount(padId: number): number {
   const set = padClients.get(padId);
   return set ? set.size : 0;
 }
 
-function forEach(fn) {
+function forEach(fn: (ws: CoMarkWebSocket) => void): void {
   for (const set of padClients.values()) {
     for (const ws of set) fn(ws);
   }
 }
 
-function getPadClients(padId) {
+function getPadClients(padId: number): Set<CoMarkWebSocket> | undefined {
   return padClients.get(padId);
 }
 

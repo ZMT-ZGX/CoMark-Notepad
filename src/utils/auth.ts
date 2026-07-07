@@ -5,14 +5,16 @@
  * These are the single source of truth for access-control rules.
  */
 
-function canAccessPad(userId, pad, hasAccessGrantFn) {
+import type { Pad, FileInfo } from '../types';
+
+function canAccessPad(userId: string | null, pad: Pad, hasAccessGrantFn?: (ownerId: string, uid: string) => boolean): boolean {
   if (!pad.ownerUserId) return true; // public pad
   if (!userId) return false;
   if (pad.ownerUserId === userId) return true; // owner
   return hasAccessGrantFn ? hasAccessGrantFn(pad.ownerUserId, userId) : false;
 }
 
-function canAccessFile(userId, file, findPadById, hasAccessGrantFn) {
+function canAccessFile(userId: string | null, file: FileInfo, findPadById: (id: number) => Pad | undefined, hasAccessGrantFn: (ownerId: string, uid: string) => boolean): boolean {
   if (!file.ownerUserId) return true; // public file
   if (!userId) return false;
   if (file.ownerUserId === userId) return true;
@@ -21,7 +23,7 @@ function canAccessFile(userId, file, findPadById, hasAccessGrantFn) {
   return false;
 }
 
-function canManagePad(userId, isAdminUser, pad) {
+function canManagePad(userId: string | null, isAdminUser: boolean, pad: Pad): boolean {
   if (pad.ownerUserId) {
     return userId === pad.ownerUserId || isAdminUser;
   }
@@ -32,7 +34,7 @@ function canManagePad(userId, isAdminUser, pad) {
   return isAdminUser;
 }
 
-function resolveFileOwner(userId, pad) {
+function resolveFileOwner(userId: string | null, pad: Pad | null): string | null {
   if (pad && pad.ownerUserId) return pad.ownerUserId;
   return userId || null;
 }

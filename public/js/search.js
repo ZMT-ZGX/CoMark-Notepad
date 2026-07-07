@@ -88,7 +88,7 @@ function renderResults(results) {
       (r) => `
     <div class="search-result" data-pad-id="${r.id}">
       <div class="search-result-id">Pad #${r.id}</div>
-      <div class="search-result-snippet">${escapeHtml(r.snippet || r.content || '').slice(0, 120)}</div>
+      <div class="search-result-snippet">${r.snippet ? r.snippet.slice(0, 120) : escapeHtml((r.content || '').slice(0, 120))}</div>
     </div>`
     )
     .join('');

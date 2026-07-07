@@ -2,13 +2,15 @@
 
 const sqlite = require('./sqlite');
 
-function findByToken(token) {
+import type { Invitation, AccessGrant } from '../types';
+
+function findByToken(token: string): Invitation | undefined {
   const db = sqlite.getDb();
   const row = db.prepare('SELECT * FROM invitations WHERE token = ?').get(token);
   return row ? rowToInvitation(row) : undefined;
 }
 
-function create(invite) {
+function create(invite: Invitation): Invitation {
   const db = sqlite.getDb();
   db.prepare(
     'INSERT INTO invitations (token, creator_code, max_uses, use_count, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)'
@@ -23,7 +25,7 @@ function create(invite) {
   return invite;
 }
 
-function remove(token) {
+function remove(token: string): { ok: boolean; revokedGrants: number } | false {
   const db = sqlite.getDb();
   const grantsBefore = db
     .prepare('SELECT COUNT(*) as cnt FROM access_grants WHERE invite_token = ?')
@@ -34,7 +36,7 @@ function remove(token) {
   return { ok: true, revokedGrants: grantsBefore };
 }
 
-function hasAccessGrant(grantorCode, granteeCode) {
+function hasAccessGrant(grantorCode: string, granteeCode: string): boolean {
   const db = sqlite.getDb();
   const row = db
     .prepare('SELECT 1 FROM access_grants WHERE grantor_code = ? AND grantee_code = ? LIMIT 1')
@@ -42,18 +44,27 @@ function hasAccessGrant(grantorCode, granteeCode) {
   return !!row;
 }
 
-function addGrant(grant) {
+function addGrant(grant: AccessGrant): void {
   const db = sqlite.getDb();
-  db.prepare(
-    'INSERT INTO access_grants (invite_token, grantor_code, grantee_code, granted_at) VALUES (?, ?, ?, ?)'
-  ).run(grant.inviteToken, grant.grantorCode, grant.granteeCode, grant.grantedAt || Date.now());
-  // Increment use count
-  db.prepare('UPDATE invitations SET use_count = use_count + 1 WHERE token = ?').run(
-    grant.inviteToken
-  );
+  // Atomic: increment use_count only if the invite is still under its limit,
+  // then insert the grant. Wrapping both in a transaction guarantees no orphan
+  // grant row is left behind if the limit was reached, and provides defense in
+  // depth against a race on max_uses even though better-sqlite3 is synchronous.
+  const txn = db.transaction((g: AccessGrant) => {
+    const upd = db
+      .prepare(
+        'UPDATE invitations SET use_count = use_count + 1 WHERE token = ? AND (max_uses = 0 OR use_count < max_uses)'
+      )
+      .run(g.inviteToken);
+    if (upd.changes === 0) throw new Error('INVITE_LIMIT_REACHED');
+    db.prepare(
+      'INSERT INTO access_grants (invite_token, grantor_code, grantee_code, granted_at) VALUES (?, ?, ?, ?)'
+    ).run(g.inviteToken, g.grantorCode, g.granteeCode, g.grantedAt || Date.now());
+  });
+  txn(grant);
 }
 
-function listByCreator(creatorCode) {
+function listByCreator(creatorCode: string): Invitation[] {
   const db = sqlite.getDb();
   return db
     .prepare('SELECT * FROM invitations WHERE creator_code = ?')
@@ -61,7 +72,7 @@ function listByCreator(creatorCode) {
     .map(rowToInvitation);
 }
 
-function listGrantsByGrantee(granteeCode) {
+function listGrantsByGrantee(granteeCode: string): AccessGrant[] {
   const db = sqlite.getDb();
   return db
     .prepare('SELECT * FROM access_grants WHERE grantee_code = ?')
@@ -69,7 +80,7 @@ function listGrantsByGrantee(granteeCode) {
     .map(rowToGrant);
 }
 
-function rowToInvitation(row) {
+function rowToInvitation(row: any): Invitation {
   return {
     token: row.token,
     creatorCode: row.creator_code,
@@ -80,7 +91,7 @@ function rowToInvitation(row) {
   };
 }
 
-function rowToGrant(row) {
+function rowToGrant(row: any): AccessGrant {
   return {
     inviteToken: row.invite_token,
     grantorCode: row.grantor_code,

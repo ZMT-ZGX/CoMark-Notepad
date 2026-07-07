@@ -1,5 +1,6 @@
 'use strict';
 
+import type { CoMarkWebSocket } from '../types';
 const { WebSocketServer } = require('ws');
 const connections = require('./connections');
 const broadcast = require('./broadcast');
@@ -8,16 +9,28 @@ const { parseCookies } = require('../middlewares/auth');
 const { isAllowedOrigin } = require('../middlewares/security');
 const db = require('../db');
 const { generateId } = require('../utils/crypto');
+const logger = require('../utils/logger');
 const {
   MAX_WS_CONNECTIONS,
   MAX_WS_CONNECTIONS_PER_IP,
   HEARTBEAT_INTERVAL_MS,
+  WS_PATCH_WINDOW_MS,
+  MAX_WS_PATCHES_PER_WINDOW,
+  JSON_BODY_LIMIT,
 } = require('../config');
 
-function initWSS(server, padService) {
-  const wss = new WebSocketServer({ server });
+// Aliases used inside the message handler (kept module-local so the handler
+// reads as plain constants rather than a config lookup each time).
+const PATCH_WINDOW_MS = WS_PATCH_WINDOW_MS;
+const MAX_PATCHES_PER_WINDOW = MAX_WS_PATCHES_PER_WINDOW;
 
-  wss.on('connection', (ws, req) => {
+function initWSS(server: any, padService: any): { wss: any; heartbeatTimer: ReturnType<typeof setInterval> } {
+  // Cap inbound frame size so a single oversized WS message can't exhaust
+  // server memory. WS frames bypass Express's JSON body-size limit, so this
+  // is the only guard against a huge patch frame.
+  const wss = new WebSocketServer({ server, maxPayload: JSON_BODY_LIMIT });
+
+  wss.on('connection', (ws: CoMarkWebSocket, req: any) => {
     // Hard connection ceiling to protect memory and heartbeat CPU
     if (connections.getTotalCount() >= MAX_WS_CONNECTIONS) {
       ws.close(1013, 'Server overloaded');
@@ -43,10 +56,15 @@ function initWSS(server, padService) {
       return;
     }
 
-    // Parse padId and token from URL query
+    // Parse padId from URL query — reject non-numeric or missing values
     const url = new URL(req.url, 'http://localhost');
-    const rawPad = Number(url.searchParams.get('pad'));
-    const padId = Number.isInteger(rawPad) && rawPad > 0 ? rawPad : 1;
+    const rawPadParam = url.searchParams.get('pad');
+    const rawPad = Number(rawPadParam);
+    if (!Number.isInteger(rawPad) || rawPad <= 0) {
+      ws.close(4400, 'Invalid pad id');
+      return;
+    }
+    const padId = rawPad;
 
     // Token verification: Cookie only (session token is never transmitted in URL)
     const cookieToken = parseCookies(req.headers.cookie || '')['session_token'];
@@ -74,6 +92,10 @@ function initWSS(server, padService) {
       ws.clientId = generateId();
       ws.padId = padId;
       ws.isAlive = true;
+      // Patch rate-limit window state (fixed window, reset on first message
+      // of each 60s interval). See message handler below.
+      ws.patchWindowStart = Date.now();
+      ws.patchCount = 0;
       connections.add(ws, { clientId: ws.clientId, padId, userId: ws.userId, ipAddress: clientIp });
 
       ws.on('pong', () => { ws.isAlive = true; });
@@ -82,17 +104,51 @@ function initWSS(server, padService) {
         broadcast.toPad(padId, { type: 'online-count', padId, count: connections.getPadCount(padId) });
       });
       ws.on('error', () => connections.remove(ws));
-      ws.on('message', (raw) => {
+      ws.on('message', (raw: Buffer) => {
         let msg;
-        try { msg = JSON.parse(raw as string); } catch { return; }
+        try { msg = JSON.parse(raw as unknown as string); } catch { return; }
         if (msg.type === 'patch' && padService) {
+          // Per-connection patch rate limit (DoS hardening — HTTP write path
+          // has express-rate-limit, but WS messages bypass Express entirely).
+          const now = Date.now();
+          if (now - ws.patchWindowStart > PATCH_WINDOW_MS) {
+            ws.patchWindowStart = now;
+            ws.patchCount = 0;
+          }
+          ws.patchCount += 1;
+          if (ws.patchCount > MAX_PATCHES_PER_WINDOW) {
+            logger.warn('WS patch rate limit exceeded, closing connection', {
+              padId,
+              clientId: ws.clientId,
+              count: ws.patchCount,
+            });
+            try { ws.close(4001, 'Patch rate limit exceeded'); } catch {}
+            return;
+          }
+
           padService.applyPatch(ws.userId, padId, msg.data, ws.clientId)
-            .then((result) => {
-              if (result) {
-                try {
-                  ws.send(JSON.stringify({ type: 'patch-ack', textVersion: result.textVersion }));
-                } catch {}
-              }
+            .then((result: any) => {
+              if (!result) return; // pad not found / access denied — silently drop
+              try {
+                if (result.ok) {
+                  ws.send(JSON.stringify({
+                    type: 'patch-ack',
+                    textVersion: result.pad.textVersion,
+                  }));
+                } else {
+                  // Patch failed to apply (concurrent conflict or malformed).
+                  // Send the authoritative full text back to the sender so its
+                  // shadow resets. Uses a dedicated 'patch-nack' (not text-update)
+                  // so the client applies it immediately even while focused,
+                  // bypassing the deferred-merge path that could drop the reset.
+                  ws.send(JSON.stringify({
+                    type: 'patch-nack',
+                    padId,
+                    text: result.pad.text,
+                    textVersion: result.pad.textVersion,
+                  }));
+                }
+              } catch {}
             })
             .catch(() => {});
         }
@@ -108,10 +164,10 @@ function initWSS(server, padService) {
       const authTimer = setTimeout(() => ws.close(4403, 'Pad locked'), 1500);
       // Clear timer if socket closes before auth (e.g. client disconnect, heartbeat timeout)
       ws.once('close', () => clearTimeout(authTimer));
-      ws.once('message', (raw) => {
+      ws.once('message', (raw: Buffer) => {
         clearTimeout(authTimer);
         let msg;
-        try { msg = JSON.parse(raw as string); } catch { ws.close(4400, 'Invalid message'); return; }
+        try { msg = JSON.parse(raw as unknown as string); } catch { ws.close(4400, 'Invalid message'); return; }
         if (msg.type !== 'auth' || !padService || !padService.isValidUnlockToken(msg.padToken, padId)) {
           ws.close(4403, 'Pad locked');
           return;
@@ -125,7 +181,7 @@ function initWSS(server, padService) {
 
   // Heartbeat
   const heartbeatTimer = setInterval(() => {
-    connections.forEach((ws) => {
+    connections.forEach((ws: CoMarkWebSocket) => {
       if (ws.readyState !== 1) {
         connections.remove(ws);
         return;

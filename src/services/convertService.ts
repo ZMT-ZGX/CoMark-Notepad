@@ -1,6 +1,6 @@
 'use strict';
 
-import type { DataStore, Broadcast } from '../types';
+import type { DataStore, Broadcast, FileInfo } from '../types';
 const path = require('path');
 const fs = require('fs');
 const { Worker } = require('worker_threads');
@@ -31,7 +31,7 @@ class ConvertService {
   convertingFiles: Set<string>;
   activeConverts: number;
 
-  constructor(store, broadcast) {
+  constructor(store: DataStore, broadcast: Broadcast) {
     this.store = store;
     this.broadcast = broadcast;
     this.convertingFiles = new Set();
@@ -47,15 +47,15 @@ class ConvertService {
     };
   }
 
-  _hasAccessGrant(grantor, grantee) {
+  _hasAccessGrant(grantor: string | null, grantee: string | null): boolean {
     return this.store.hasAccessGrant(grantor, grantee);
   }
 
-  getFileById(fileId) {
+  getFileById(fileId: string): FileInfo | null {
     return this.store.findFileById(fileId) || null;
   }
 
-  async convert(userId, fileId) {
+  async convert(userId: string | null, fileId: string) {
     if (this.activeConverts >= MAX_CONCURRENT_CONVERTS) {
       throw ServiceUnavailableError('Too many conversions in progress, try again shortly');
     }
@@ -151,7 +151,7 @@ class ConvertService {
     }
   }
 
-  _convertInWorker(buffer, ext, mimeType, originalName) {
+  _convertInWorker(buffer: Buffer, ext: string, mimeType: string, originalName: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const worker = new Worker(path.join(__dirname, '../../convert-worker.js'), {
         workerData: { buffer, ext, mimeType, originalName },
@@ -165,7 +165,7 @@ class ConvertService {
         reject(new Error('CONVERT_TIMEOUT'));
       }, CONVERT_TIMEOUT_MS);
 
-      worker.on('message', (msg) => {
+      worker.on('message', (msg: any) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -178,14 +178,14 @@ class ConvertService {
           reject(err);
         }
       });
-      worker.on('error', (err) => {
+      worker.on('error', (err: Error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         worker.terminate().catch(() => {});
         reject(err);
       });
-      worker.on('exit', (code) => {
+      worker.on('exit', (code: number) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);

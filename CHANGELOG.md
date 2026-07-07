@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-07-07
+
+### Code Review Hardening (10 项)
+
+基于全量代码审查的修复与加固：
+
+1. **`padId` 兜底模式修正** — 删除/清理文件时 `(f.padId || 1)` 改为严格相等 `(f.padId === padId)`；`fileService` / `db/files` / `db/sqlite` 的默认查找 `|| 1` → `?? 1`（仅在 `null`/`undefined` 时回退，避免有效 `padId` 被误默认）
+2. **`DiffMatchPatch` 单例（后端）** — `padService` 提升为类字段并在构造函数初始化一次，不再每次 `applyPatch` 新建实例（减少 GC 压力）
+3. **发送端 `lastSyncedText` 时序** — `text-sync.js` 将 `state.lastSyncedText = currentText` 移到 `ws.send()` 之后，避免断连时本地影子领先于服务端而产生内容分叉
+4. **搜索高亮修复** — `search.js` 仅当存在服务端生成的 `<mark>` 片段时按 HTML 渲染，否则转义文本（修复高亮失效，且无 XSS 风险）
+5. **WebSocket `maxPayload`** — `ws/index.ts` 设置 `maxPayload: JSON_BODY_LIMIT`（2MB），防止超大帧耗尽内存（WS 帧绕过 Express body 限制）
+6. **CSP 收紧** — `app.ts` `scriptSrc` 移除未使用的 `cdn.jsdelivr.net` 放行，与「禁止 CDN 加载脚本」策略一致
+7. **`/api/auth/verify` 补 `checkOrigin`** — 与 `/register` / `/logout` 保持一致，统一 CSRF 防御
+8. **邀请 `maxUses` 原子强制（纵深防御）** — `db/invitations.addGrant` 改为事务内「先条件递增再插授权」，命中上限时回滚并抛 `INVITE_LIMIT_REACHED`；`inviteService.redeem` 转换为 `GoneError`，杜绝 orphan 授权行
+9. **`DiffMatchPatch` 单例（前端）** — `text-sync.js` 提取模块级 `getDmp()` 单例，替换 4 处 `new window.diff_match_patch()`
+
+> 注：审查中报告的首项「`::root` 选择器拼写错误」经核验为误报，`public/style.css` 实际已为 `:root`，全站样式正常，无需改动。
+
+### Test Coverage
+
+- 72/72 测试全部通过（较 1.1.0 新增 4 个用例，含 WS patch 速率限制、并发 patch 等）
+- 修复后 typecheck + lint 零错误
+
+---
+
 ## [1.1.0] - 2026-07-05
 
 ### Patch-based Collaborative Editing

@@ -4,7 +4,7 @@ import type { CoMarkWebSocket } from '../types';
 
 const connections = require('./connections');
 
-function toPad(padId, data, excludeWsId) {
+function toPad(padId: number, data: any, excludeWsId?: string | null): void {
   const set = connections.getPadClients(padId);
   if (!set || set.size === 0) return;
   const msg = JSON.stringify(data);
@@ -24,11 +24,11 @@ function toPad(padId, data, excludeWsId) {
   }
 }
 
-function toAll(data) {
+function toAll(data: any): void {
   const msg = JSON.stringify(data);
   const allClients: CoMarkWebSocket[] = [];
   // Collect all active clients first (snapshot), to avoid mutation during iteration
-  connections.forEach((ws) => {
+  connections.forEach((ws: CoMarkWebSocket) => {
     if (ws.readyState === 1) {
       allClients.push(ws);
     } else {

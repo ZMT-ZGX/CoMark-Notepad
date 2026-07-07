@@ -10,7 +10,7 @@ const errorHandler = require('./middlewares/errorHandler');
 const { mountRoutes } = require('./routes');
 const logger = require('./utils/logger');
 
-function createApp(services, getServerPort, getPadClients) {
+function createApp(services: any, getServerPort: (() => number) | null, getPadClients: (padId: number) => Set<any> | undefined) {
   const app = express();
   app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 0));
   app.disable('x-powered-by');
@@ -22,7 +22,7 @@ function createApp(services, getServerPort, getPadClients) {
         directives: {
           defaultSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
-          scriptSrc: ["'self'", 'https://cdn.jsdelivr.net'],
+          scriptSrc: ["'self'"],
           imgSrc: ["'self'", 'data:', 'blob:'],
           connectSrc: ["'self'", 'ws:', 'wss:'],
           baseUri: ["'self'"],
@@ -40,7 +40,7 @@ function createApp(services, getServerPort, getPadClients) {
   );
 
   // Request logging
-  app.use((req, _res, next) => {
+  app.use((req: any, _res: any, next: any) => {
     const ip = req.ip || req.socket.remoteAddress;
     logger.info(`${req.method} ${req.path} [${ip}]`);
     next();
@@ -60,7 +60,7 @@ function createApp(services, getServerPort, getPadClients) {
   const deleteLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
-    skip: (req) => req.method !== 'DELETE',
+    skip: (req: any) => req.method !== 'DELETE',
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many delete requests.' },
@@ -75,7 +75,7 @@ function createApp(services, getServerPort, getPadClients) {
   app.use(authenticate);
 
   // Prevent iOS Safari from caching HTML (ensures fresh CSS/JS refs)
-  app.use((req, res, next) => {
+  app.use((req: any, res: any, next: any) => {
     if (req.path === '/' || req.path.endsWith('.html')) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     }
@@ -87,7 +87,7 @@ function createApp(services, getServerPort, getPadClients) {
   app.use('/vendor', express.static(path.join(__dirname, '..', 'public', 'vendor')));
 
   // Full-text search (FTS5) — scoped to pads the current user can access
-  app.get('/api/search', (req, res, next) => {
+  app.get('/api/search', (req: any, res: any, next: any) => {
     try {
       const raw = String(req.query.q || '').trim().slice(0, 200);
       if (!raw) return res.json({ results: [] });
@@ -99,7 +99,7 @@ function createApp(services, getServerPort, getPadClients) {
       const rows = db.searchPads(tokens);
       // Use full pad from DB so invitation-grant check in canAccessPad works correctly.
       const results = rows
-        .map((r) => {
+        .map((r: any) => {
           const pad = db.pads.findById(r.id);
           if (!pad || !padService.canAccessPad(req.userId, pad)) return null;
           return {

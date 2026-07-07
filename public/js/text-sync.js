@@ -8,8 +8,19 @@
 import { state, $, showToast } from './core.js';
 import { updateTextStats } from './files.js';
 import { updatePadText } from './server.js';
+import { loadPadContent } from './pads.js';
 
 const textarea = () => $('#text-input');
+
+// Reuse a single diff-match-patch instance instead of constructing one per
+// send/receive. Returns null when the vendored library is unavailable so
+// callers can bail out safely.
+let dmpInstance = null;
+function getDmp() {
+  if (typeof window.diff_match_patch !== 'function') return null;
+  if (!dmpInstance) dmpInstance = new window.diff_match_patch();
+  return dmpInstance;
+}
 
 // --- Text state ---
 
@@ -58,7 +69,7 @@ export function applyRemoteText(text, version) {
 export function applyRemotePatch(patchText, version) {
   if (version <= state.textVersion) return;
   if (typeof window.diff_match_patch !== 'function') return;
-  const dmp = new window.diff_match_patch();
+  const dmp = getDmp();
   let patches;
   try {
     patches = dmp.patch_fromText(patchText);
@@ -68,9 +79,12 @@ export function applyRemotePatch(patchText, version) {
   const ta = textarea();
   const start = ta.selectionStart;
   const end = ta.selectionEnd;
-  const [newText, results] = dmp.patch_apply(patches, ta.value);
+  // Apply patch against the shadow (last confirmed server state), not the dirty
+  // textarea value which may contain unsent local edits.
+  const [newText, results] = dmp.patch_apply(patches, state.lastSyncedText);
   if (!Array.isArray(results) || results.some((r) => !r)) {
-    console.warn('applyRemotePatch: patch failed to apply cleanly');
+    console.warn('applyRemotePatch: patch failed to apply cleanly — resyncing from server');
+    loadPadContent();
     return;
   }
   ta.value = newText;
@@ -79,6 +93,19 @@ export function applyRemotePatch(patchText, version) {
   state.textVersion = Math.max(state.textVersion, version);
   state.lastSyncedText = newText;
   updateTextStats();
+}
+
+/**
+ * Server rejected our patch (concurrent conflict it couldn't merge, or
+ * malformed patch). Reset shadow + textarea to the authoritative server text.
+ *
+ * Unlike applyRemoteText (which defers when the textarea is focused), this
+ * always applies immediately — the client's shadow is known-stale, so
+ * deferring would only extend the divergence window.
+ */
+export function applyPatchNack(text, version) {
+  if (version < state.textVersion) return;
+  applyTextState(text || '', version);
 }
 
 // --- Offline banner ---
@@ -108,15 +135,17 @@ export async function sendTextNow() {
   const ws = state.ws;
   if (ws && ws.readyState === WebSocket.OPEN) {
     if (typeof window.diff_match_patch !== 'function') return;
-    const dmp = new window.diff_match_patch();
+    const dmp = getDmp();
     const patches = dmp.patch_make(state.lastSyncedText, currentText);
     const patchText = dmp.patch_toText(patches);
-    state.lastSyncedText = currentText;
     ws.send(JSON.stringify({ type: 'patch', padId: state.currentPadId, data: patchText }));
+    // Advance the synced shadow only after the frame is on the wire, so a
+    // disconnect during send can't leave the local shadow ahead of the server.
+    state.lastSyncedText = currentText;
   } else if (!ws || ws.readyState === WebSocket.CONNECTING) {
     if (typeof window.diff_match_patch !== 'function') return;
     // Queue for when connection opens — pad-scoped
-    const dmp = new window.diff_match_patch();
+    const dmp = getDmp();
     const patches = dmp.patch_make(state.lastSyncedText, currentText);
     const patchText = dmp.patch_toText(patches);
     state.lastSyncedText = currentText;
@@ -198,7 +227,7 @@ function handleBeforeUnload() {
   const ta = textarea();
   if (!ta || ta.value === state.lastSyncedText) return;
   try {
-    const dmp = new window.diff_match_patch();
+    const dmp = getDmp();
     const patches = dmp.patch_make(state.lastSyncedText, ta.value);
     const patchText = dmp.patch_toText(patches);
     if (patchText) {

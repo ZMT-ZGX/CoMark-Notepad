@@ -2,18 +2,20 @@
 
 const sqlite = require('./sqlite');
 
-function findById(id) {
+import type { Pad } from '../types';
+
+function findById(id: number): Pad | undefined {
   const db = sqlite.getDb();
   const row = db.prepare('SELECT * FROM pads WHERE id = ?').get(id);
   return row ? rowToPad(row) : undefined;
 }
 
-function findAll() {
+function findAll(): Pad[] {
   const db = sqlite.getDb();
   return db.prepare('SELECT * FROM pads ORDER BY id').all().map(rowToPad);
 }
 
-function create(pad) {
+function create(pad: Partial<Pad> & { ownerUserId?: string | null; creatorCode?: string | null }): Pad | undefined {
   const db = sqlite.getDb();
   const createdAt = Date.now();
 
@@ -26,23 +28,23 @@ function create(pad) {
   return findById(Number(result.lastInsertRowid));
 }
 
-function updateText(id, text) {
+function updateText(id: number, text: string): Pad | null {
   const db = sqlite.getDb();
   const result = db
     .prepare('UPDATE pads SET text = ?, text_version = text_version + 1 WHERE id = ?')
     .run(text, id);
   if (result.changes === 0) return null;
-  return findById(id);
+  return findById(id) || null;
 }
 
-function updatePassword(id, passwordHash) {
+function updatePassword(id: number, passwordHash: string | null): Pad | null {
   const db = sqlite.getDb();
   const result = db.prepare('UPDATE pads SET password = ? WHERE id = ?').run(passwordHash, id);
   if (result.changes === 0) return null;
-  return findById(id);
+  return findById(id) || null;
 }
 
-function remove(id) {
+function remove(id: number): void {
   const db = sqlite.getDb();
   db.prepare('DELETE FROM pads WHERE id = ?').run(id);
 }
@@ -51,7 +53,7 @@ function remove(id) {
  * Full-text search via FTS5 (trigram tokenizer).
  * Returns padId + content (truncated to 200 chars).
  */
-function searchPads(matchQuery) {
+function searchPads(matchQuery: string): Array<{ id: number; content: string; ownerUserId: string | null }> {
   const db = sqlite.getDb();
   // bm25() gives relevance ranking; lower score = better match.
   const rows = db
@@ -71,7 +73,7 @@ function searchPads(matchQuery) {
  * Return a highlighted snippet of the pad text centered on the first match,
  * using FTS5's built-in snippet() helper. Returns '' if no match.
  */
-function searchSnippet(matchQuery, padId?) {
+function searchSnippet(matchQuery: string, padId?: number): string {
   const db = sqlite.getDb();
   try {
     const sql = padId != null
@@ -92,7 +94,7 @@ function searchSnippet(matchQuery, padId?) {
   }
 }
 
-function rowToPad(row) {
+function rowToPad(row: any): Pad {
   return {
     id: row.id,
     text: row.text,
