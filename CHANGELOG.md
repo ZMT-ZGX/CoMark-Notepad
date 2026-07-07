@@ -20,9 +20,17 @@ All notable changes to this project are documented in this file. Versions follow
 
 > 注：审查中报告的首项「`::root` 选择器拼写错误」经核验为误报，`public/style.css` 实际已为 `:root`，全站样式正常，无需改动。
 
+### Security Hardening（额外 3 项）
+
+基于二次安全审查的补充修复：
+
+10. **IPv6 ULA 私网识别补全** — `security.ts` 的 `isPrivateIp` 正则由 `/^fc[0-9a-f]/` 改为 `/^f[cd][0-9a-f]/`，同时覆盖 `fc00::/8` 与 `fd00::/8`（`fc00::/7`）。原写法遗漏了实际部署中最常用的 `fd00::/8`，导致使用该类局域网 IPv6 地址的客户端在 `PUBLIC_ORIGIN` 未显式配置时，CSRF 检查返回 403、WebSocket 握手被关闭（4400）。该函数在 HTTP `checkOrigin` 与 WS `isAllowedOrigin` 共用，一处修复两端生效
+11. **`/register` 不再回显 session token** — 响应体由 `{ code, token, expiresInDays }` 改为 `{ code, expiresInDays }`。token 仅通过 HttpOnly cookie 下发，杜绝页面任意 XSS 通过响应体窃取凭据、使 HttpOnly 防护形同虚设的问题。对应测试已改为断言 `data.token === undefined`
+12. **`/logout` 撤销前校验签名** — 原实现对任意 `x-session-token` 字符串直接写入 `revoked_tokens` 表，攻击者可借此灌表造成存储膨胀（DoS）。现对 cookie 与 header 两路 token 均先经 `verifySessionToken` 验签，仅结构合法且签名有效时才撤销
+
 ### Test Coverage
 
-- 72/72 测试全部通过（较 1.1.0 新增 4 个用例，含 WS patch 速率限制、并发 patch 等）
+- 72/72 测试全部通过（较 1.1.0 新增 4 个用例，含 WS patch 速率限制、并发 patch 等；`identity.test.js` 强化 token 不回显断言）
 - 修复后 typecheck + lint 零错误
 
 ---

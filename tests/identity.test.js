@@ -92,7 +92,9 @@ async function registerUser(baseUrl, headers = {}) {
   const data = await res.json();
   const cookie = extractCookie(res);
   assert.ok(cookie, 'registration should set a session cookie');
-  return { code: data.code, token: data.token, cookie };
+  // The session token is delivered only via the HttpOnly cookie (never in the
+  // JSON body), so downstream callers source the token from the cookie value.
+  return { code: data.code, token: cookie, cookie };
 }
 
 // --- Tests ---
@@ -105,11 +107,12 @@ test('register returns user code and sets cookie', async () => {
     const data = await res.json();
     assert.ok(data.code);
     assert.equal(data.code.length, 8);
-    assert.ok(data.token);
-    assert.ok(data.token.includes('.')); // userId.signature format
+    // Session token must NOT be exposed in the JSON body — it is delivered
+    // exclusively via the HttpOnly cookie so XSS cannot read it.
+    assert.equal(data.token, undefined, 'token must not be in response body');
     const cookie = extractCookie(res);
     assert.ok(cookie, 'Set-Cookie header should be present');
-    assert.equal(cookie, data.token);
+    assert.ok(cookie.includes('.'), 'cookie should be userId.ts.signature format');
   } finally {
     await stopServer(server);
   }
@@ -752,14 +755,18 @@ test('register accepts custom expiresInDays', async () => {
     });
     const data = await res.json();
     assert.equal(data.expiresInDays, 7);
+    // Token is delivered only via HttpOnly cookie, not in the JSON body
+    assert.equal(data.token, undefined, 'token must not be in response body');
 
-    // Token should have 3 parts
-    const parts = data.token.split('.');
+    const cookie = extractCookie(res);
+    assert.ok(cookie, 'Set-Cookie header should be present');
+    // Cookie value should have 3 parts: userId.ts.signature
+    const parts = cookie.split('.');
     assert.equal(parts.length, 3);
 
     // Token should still work
     const me = await fetch(`${server.baseUrl}/api/auth/me`, {
-      headers: cookieHeader(extractCookie(res)),
+      headers: cookieHeader(cookie),
     });
     assert.equal(me.status, 200);
   } finally {

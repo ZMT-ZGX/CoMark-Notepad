@@ -13,8 +13,11 @@ function isPrivateIp(hostname: string): boolean {
       b = +m[2];
     return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
   }
-  // IPv6 unique local (fc00::/7) and link-local (fe80::/10)
-  if (/^fc[0-9a-f]/i.test(hostname) || /^fe80:/i.test(hostname)) return true;
+  // IPv6 unique local (fc00::/7 = fc00::/8 + fd00::/8) and link-local (fe80::/10)
+  // NOTE: fc00::/7 occupies the first 7 bits 1111 110, so the second nibble is
+  // either c or d. The original regex only matched fc00::/8, silently rejecting
+  // the actually-assigned fd00::/8 range used by most LANs (CSRF 403 + WS 4400).
+  if (/^f[cd][0-9a-f]/i.test(hostname) || /^fe80:/i.test(hostname)) return true;
   return false;
 }
 

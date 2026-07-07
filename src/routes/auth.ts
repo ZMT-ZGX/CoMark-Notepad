@@ -4,7 +4,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { checkOrigin } = require('../middlewares/security');
 const { UnauthorizedError } = require('../utils/errors');
-const { generateUserCode, signSessionToken } = require('../utils/crypto');
+const { generateUserCode, signSessionToken, verifySessionToken } = require('../utils/crypto');
 const session = require('../auth/session');
 const { SESSION_TOKEN_TTL_DAYS, cookieFlags } = require('../config');
 const { validate } = require('../middlewares/validate');
@@ -44,7 +44,9 @@ function createRouter(db: any) {
       'Set-Cookie',
       `session_token=${token}; ${cookieFlags}; Max-Age=${expiresInDays * 86400}`
     );
-    res.json({ code, token, expiresInDays });
+    // Do not echo the raw token in the response body — it is delivered via
+    // HttpOnly cookie only, which prevents XSS-based token theft.
+    res.json({ code, expiresInDays });
   });
 
   router.post('/verify', checkOrigin, validate(VerifySchema), (req: any, res: any) => {
@@ -74,8 +76,12 @@ function createRouter(db: any) {
     const nowSec = Date.now() / 1000;
     const ttl = SESSION_TOKEN_TTL_DAYS * 86400;
 
-    if (cookieToken) session.revokeToken(cookieToken, nowSec + ttl);
-    if (headerToken && typeof headerToken === 'string')
+    // Only revoke tokens that carry a valid HMAC signature. An unsigned or
+    // forged string would just insert garbage into the revoked_tokens table,
+    // gradually inflating it with every unauthenticated POST /logout request.
+    if (cookieToken && verifySessionToken(cookieToken))
+      session.revokeToken(cookieToken, nowSec + ttl);
+    if (headerToken && typeof headerToken === 'string' && verifySessionToken(headerToken))
       session.revokeToken(headerToken, nowSec + ttl);
 
     res.setHeader('Set-Cookie', `session_token=; ${cookieFlags}; Max-Age=0`);
