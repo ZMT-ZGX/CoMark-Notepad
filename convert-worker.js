@@ -2,7 +2,7 @@
 
 const { parentPort, workerData } = require('worker_threads');
 const mammoth = require('mammoth');
-const pdfParse = require('pdf-parse');
+const { PDFParse } = require('pdf-parse');
 const TurndownService = require('turndown');
 const { gfm } = require('@joplin/turndown-plugin-gfm');
 const readExcelFile = require('read-excel-file/node');
@@ -383,8 +383,15 @@ function isTitleShape(shapeXml) {
 // ── Individual converters ───────────────────────────────────────────────────
 
 async function convertPdf(buffer) {
-  const result = await pdfParse(Buffer.from(buffer));
-  return result.text || '';
+  // pdf-parse v2 exposes a PDFParse class (v1's default-export function was
+  // removed). Construct with { data }, call getText(), then release resources.
+  const parser = new PDFParse({ data: new Uint8Array(Buffer.from(buffer)) });
+  try {
+    const result = await parser.getText();
+    return result.text || '';
+  } finally {
+    await parser.destroy().catch(() => {});
+  }
 }
 
 async function convertDocx(buffer) {
