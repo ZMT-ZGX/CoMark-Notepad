@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] - 2026-07-08
+
+### 公开 Pad 文件删除权限放宽（有意为之）
+
+公开 Pad（`ownerUserId` 与 `creatorCode` 均为空）上，**任意已登录用户均可删除 / 清空文件，忽略 owner 匹配**；匿名删除仍被拒绝（单文件 401、批量 403）；私人 Pad 权限不变。
+
+- **背景**：身份由浏览器自动注册，每次服务重启使旧会话失效并产生新身份，旧身份上传的文件因 owner 不匹配而无法被新身份删除。放宽后单人本地场景可正常管理自己的全部文件。
+- **安全权衡**：该放宽对「共享 / 多人部署」会削弱文件访问控制（任意登录用户可删他人文件）。当前版本默认保留此行为以保障单人本地体验；严格模式请在共享前通过设置 `ADMIN_TOKEN` 并评估（详见 README「访问控制模型」）。
+- 同步更新 `tests/identity.test.js` 断言：公开 Pad 上普通登录用户删 / 清空文件现预期为 200。
+
+### 其他修复与改进
+
+- **上传大文件永久卡死修复（严重）** — 几百 KB 以上的文件上传会永远停在「Uploading…」，服务端收完 body 却从不返回。根因：中断检测用 `req.on('close')` + `req.destroyed`，而 `req.destroyed` 在请求正常结束时也会变 `true`；较大的 multipart body 使 `close` 早于 busboy 的 `finish` 触发，被误判为中断 → 销毁正在写入的文件流 → busboy `finish` 里 `await fileWritePromise` 永不 settle → 请求悬挂。改用 `req.on('close')` + `!req.complete`（`req.complete` 为 `true` 表示 body 已完整接收，属正常结束）。已验证 800KB / 2.8MB PDF 上传返回 200 并完整落盘，真正的中途中断仍正确清理半成品；同时规避了已弃用的 `req.on('aborted')`。
+- **pdf-parse v2 迁移（严重）** — 升级到 pdf-parse v2.4.5 后 **所有 PDF → Markdown 转换失败（HTTP 422）**：v2 移除了默认导出函数，改为 `PDFParse` 类。`convert-worker.js` 改用 `new PDFParse({ data })` → `getText()`，并在 `finally` 中 `destroy()` 释放资源。
+- **IPv6 私网识别补全** — `security.ts` 的 `isPrivateIp` 在剥离 `::ffff:` 前缀前先去除 IPv6 方括号（`[::1]` / `[fd00::1]`），修复方括号形式 IPv6 主机被误判为公网导致 CSRF 403 / WS 4400。
+- **`SESSION_SECRET` 开发期持久化** — 未显式设置时持久化到 `DATA_DIR/.session_secret`（已被 `.gitignore` 忽略，权限 `0600`），使会话在重启后有效；生产环境仍强制要求显式设置。
+- **代码去重** — 提取 `isPublicPad(pad)` 辅助函数，`deleteFile` / `clearFiles` 复用；`clearFiles` 权限判断合并为单一 `canClear` 守卫。
+- **粘贴上传文件** — `files.js` 新增全页 `paste` 监听：⌘/Ctrl+V 可上传剪贴板中的文件（访达/资源管理器复制的文件）或截图（自动命名 `pasted-<时间戳>[-N].<ext>`），复用拖拽的确认流程；剪贴板仅含文本、或焦点在正文且仅为图片时不拦截（后者仍由 `text-sync.js` 内嵌为 base64）。`index.html` 空状态提示同步为「Drag, paste, or click Upload」。
+- **hotkeys-js 容错** — `shortcuts.js` 在 `hotkeys` 全局缺失时静默跳过，不再中断整条初始化链。
+- **限流范围收窄** — 单文件删除移出专用删除限流（仅受通用限流保护），批量清空保留独立 `clearFilesLimiter`（max 5）。
+- **CSP 调整** — `app.ts` `scriptSrc` 重新允许 `https://cdn.jsdelivr.net`（alloyfinger 经 CDN 加载且已配 SRI `integrity`）。
+- **匿名删除统一 401** — `routes/files.ts` 对任意文件的匿名删除返回 401（原仅对无主文件）。
+
+### Test Coverage
+
+- 72/72 测试全部通过
+- typecheck + lint 零错误
+
+---
+
 ## [1.1.1] - 2026-07-07
 
 ### Code Review Hardening (10 项)

@@ -11,7 +11,7 @@
 - **离线队列** — 断网时编辑进 localStorage（按 pad 隔离），重连后按序自动 flush
 - **WS 心跳保活** — 30 秒 ping/pong + 强杀幽灵连接，内存不会泄漏
 - **SQLite 全文搜索** — FTS5（trigram 分词）毫秒级搜索，匹配高亮片段
-- **文件共享** — 拖拽上传文件（Busboy 流式，100MB 上限），支持中文文件名
+- **文件共享** — 拖拽 / 粘贴（⌘/Ctrl+V 上传剪贴板文件或截图）/ 点击上传（Busboy 流式，100MB 上限），支持中文文件名
 - **文件转 Markdown** — PDF / DOCX / XLSX / PPTX / HTML / CSV / TXT / JSON / XML / YAML 及 JPG / PNG / GIF 一键转换
 - **邀请制访问控制** — 三级权限（公开 / 受邀 / 管理员），HMAC Cookie 认证
 - **密码保护** — 单个 Pad 可独立设密，WS 解锁 token 不走 URL
@@ -90,7 +90,7 @@ docker compose logs -f
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `PORT` | `8000` | 服务端口 |
-| `SESSION_SECRET` | 随机生成（开发） | HMAC 签名密钥（**生产必填**）|
+| `SESSION_SECRET` | 随机生成（开发） | HMAC 签名密钥（**生产必填**）。开发模式下若未显式设置，会在 `DATA_DIR/.session_secret`（已被 `.gitignore` 忽略，权限 `0600`）持久化一个稳定密钥，使登录会话在重启后依然有效；生产环境必须用环境变量显式提供 |
 | `SESSION_TOKEN_TTL_DAYS` | `30` | Token 有效期（天）|
 | `PUBLIC_ORIGIN` | `http://localhost:PORT` | CSRF Origin 校验锚点 |
 | `ADMIN_TOKEN` | 无 | 全局管理员令牌 |
@@ -132,8 +132,13 @@ docker compose logs -f
 | 操作 | 公开 Pad | 私人 Pad | Admin |
 |------|----------|----------|-------|
 | 读取 / 编辑 | ✓ 所有认证用户 | ✓ 所有者+受邀 | ✓ |
-| 上传 / 删除文件 | ✓ Pad 创建者 | ✓ 所有者+受邀 | ✓ |
-| 设置密码 / 删除 | ✓ Pad 创建者 | ✓ 所有者 | ✓ |
+| 上传 / 删除文件 | ✓ 任何已认证用户 ¹ | ✓ 所有者+受邀 | ✓ |
+| 设置密码 / 删除 Pad | 仅 Admin | ✓ 所有者 | ✓ |
+
+> **¹ 公开 Pad 的文件删除（有意为之）**：公开 Pad（`ownerUserId` 与 `creatorCode` 均为空）上，**任何已登录用户都可以删除 / 清空文件，不要求必须是上传者本人**。此设计针对「单人在本机使用」的场景——本应用的身份由浏览器自动注册，每次服务重启会使旧会话失效并产生一个全新身份，若严格按 owner 校验，用户将无法删除自己之前上传、但挂在旧身份下的文件。权衡如下：
+> - **匿名用户**删除任何文件仍被拒绝（`DELETE /api/files/:id` 返回 401，批量清空返回 403）。
+> - **私人 Pad**（有 `ownerUserId`）的删除 / 清空权限完全不变，仍仅限所有者、受邀者与管理员。
+> - **多人 / 共享部署注意**：若把本服务部署给多人共用，公开 Pad 上任意登录用户可删他人文件。如需严格权限，请设置 `ADMIN_TOKEN`（见下「环境变量」）并在共享前评估此行为；当前版本默认保留此放宽以保障单人本地体验。
 
 ## API
 
@@ -227,7 +232,7 @@ collab-notepad/
 │   │   └── diff_match_patch.js   # 浏览器全局（从 node_modules 包装）
 │   └── style.css
 ├── convert-worker.js      # Worker Thread 文件转换引擎
-├── tests/                 # 集成测试（68 个）
+├── tests/                 # 集成测试（72 个）
 │   ├── identity.test.js
 │   ├── smoke.test.js
 │   ├── convert.test.js
@@ -278,6 +283,14 @@ collab-notepad/
 - **测试 72/72 全通过**（较 1.1.0 新增 4 个用例）
 
 > 注：审查报告的首项「`::root` 拼写错误」经核验为误报，样式本就正常。
+
+### v1.1.2 (2026-07-08)
+
+**公开 Pad 文件删除权限放宽（有意为之）**
+
+- 公开 Pad 上任意已登录用户可删除 / 清空文件，忽略 owner；匿名删除仍被拒；私人 Pad 权限不变
+- 背景与多人部署的安全权衡见上方「访问控制模型」¹ 注释
+- 其他修复：**上传大文件永久卡死**（`req.destroyed` 误判中断，改用 `!req.complete`）、**PDF 转 Markdown 全部失败**（pdf-parse v2 `PDFParse` 类迁移）、IPv6 私网识别补全、`SESSION_SECRET` 开发期持久化（`0600`）、`isPublicPad` 去重、粘贴上传文件/截图、hotkeys-js 容错、限流范围收窄、CSP 重新允许 cdn.jsdelivr.net（SRI）
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 

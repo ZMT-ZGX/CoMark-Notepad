@@ -28,7 +28,7 @@ collab-notepad/
 │   │   ├── ws.js                 # WebSocket client
 │   │   ├── server.js             # HTTP API client
 │   │   ├── pads.js               # Pad tabs
-│   │   ├── files.js              # File list
+│   │   ├── files.js              # File list · drag/paste/click upload
 │   │   ├── search.js             # FTS5 search UI
 │   │   ├── preview.js            # Markdown preview + TOC
 │   │   ├── shortcuts.js          # Keyboard shortcuts
