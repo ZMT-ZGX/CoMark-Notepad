@@ -69,13 +69,30 @@ const CONVERT_FEATURES = {
 
 // Session & Auth
 const isProduction = process.env.NODE_ENV === 'production';
-const SESSION_SECRET =
-  process.env.SESSION_SECRET ||
-  (isProduction
-    ? (() => {
-        throw new Error('SESSION_SECRET env var is required in production');
-      })()
-    : require('crypto').randomBytes(32).toString('hex'));
+const SESSION_SECRET = (() => {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  if (isProduction) {
+    throw new Error('SESSION_SECRET env var is required in production');
+  }
+  // Dev convenience: persist a stable secret so login sessions survive a
+  // server restart. Without this, every reboot regenerates the HMAC key and
+  // invalidates all session cookies (users get logged out and then hit
+  // "Access denied" when deleting files they own).
+  try {
+    const fs = require('fs');
+    const secretFile = path.join(DATA_DIR, '.session_secret');
+    const existing = fs.readFileSync(secretFile, 'utf8').trim();
+    if (existing) return existing;
+    const generated = require('crypto').randomBytes(32).toString('hex');
+    // 0600 so the HMAC signing key is not world-/group-readable on shared hosts.
+    fs.writeFileSync(secretFile, generated, { mode: 0o600 });
+    console.error('[config] persisted SESSION_SECRET to', secretFile);
+    return generated;
+  } catch (e) {
+    console.error('[config] failed to persist SESSION_SECRET:', e instanceof Error ? e.message : String(e));
+    return require('crypto').randomBytes(32).toString('hex');
+  }
+})();
 
 const SESSION_TOKEN_TTL_DAYS = parsePositiveInt(process.env.SESSION_TOKEN_TTL_DAYS, 30);
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${PORT}`;

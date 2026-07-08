@@ -61,9 +61,10 @@ function createRouter(fileService: any, padService: any) {
       try {
         const excludeWsId = req.body._wsId;
 
-        // Legacy public file (no owner): require authentication (401 vs 403)
+        // Anonymous deletion of any file: prompt login (401) rather than
+        // letting it fall through to a confusing "Access denied" (403).
         const file = fileService.getFileById(req.params.id);
-        if (file && !file.ownerUserId && !req.userId && !isAdmin(req)) {
+        if (file && !req.userId && !isAdmin(req)) {
           throw UnauthorizedError('Authentication required');
         }
 

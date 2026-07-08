@@ -22,7 +22,7 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
         directives: {
           defaultSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
-          scriptSrc: ["'self'"],
+          scriptSrc: ["'self'", 'https://cdn.jsdelivr.net'],
           imgSrc: ["'self'", 'data:', 'blob:'],
           connectSrc: ["'self'", 'ws:', 'wss:'],
           baseUri: ["'self'"],
@@ -56,7 +56,10 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
   });
   app.use('/api/', generalLimiter);
 
-  // Delete limiters (only count DELETE requests)
+  // Delete limiter — guards the destructive "delete whole pad" action.
+  // Single-file deletes (DELETE /api/files/:id) are routine user operations
+  // and are instead covered by the general limiter below; the bulk "clear all
+  // files" action already has its own clearFilesLimiter (max 5).
   const deleteLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
@@ -66,7 +69,6 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
     message: { error: 'Too many delete requests.' },
   });
   app.use('/api/pads/', deleteLimiter);
-  app.use('/api/files/', deleteLimiter);
 
   // Body parser
   app.use(express.json({ limit: JSON_BODY_LIMIT }));

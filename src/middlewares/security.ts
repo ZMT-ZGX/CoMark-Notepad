@@ -4,6 +4,9 @@
 const EXPLICIT_PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || null;
 
 function isPrivateIp(hostname: string): boolean {
+  // Strip IPv6 address brackets (e.g. [::1], [fd00::1]) — URL().hostname
+  // returns the literal bracketed form for IPv6 hosts.
+  hostname = hostname.replace(/^\[/, '').replace(/\]$/, '');
   // Strip IPv6-mapped IPv4 prefix (e.g. ::ffff:192.168.1.1)
   hostname = hostname.replace(/^::ffff:/i, '');
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
@@ -17,6 +20,7 @@ function isPrivateIp(hostname: string): boolean {
   // NOTE: fc00::/7 occupies the first 7 bits 1111 110, so the second nibble is
   // either c or d. The original regex only matched fc00::/8, silently rejecting
   // the actually-assigned fd00::/8 range used by most LANs (CSRF 403 + WS 4400).
+  // Brackets around the literal address (e.g. [fd00::1]) are already stripped above.
   if (/^f[cd][0-9a-f]/i.test(hostname) || /^fe80:/i.test(hostname)) return true;
   return false;
 }
