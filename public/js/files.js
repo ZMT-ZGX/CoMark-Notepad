@@ -189,6 +189,36 @@ export function stopTimeLabelUpdater() {
 
 // --- File Upload ---
 
+/**
+ * Collect files from a ClipboardData object.
+ * Handles two cases:
+ *   1. Real files copied from OS file manager  → clipboardData.files
+ *   2. Screenshot / image data from clipboard  → clipboardData.items (image/* blobs)
+ * Returns an array of File objects ready for upload.
+ */
+function collectClipboardFiles(clipboardData) {
+  if (!clipboardData) return [];
+
+  // Case 1: actual files (e.g. copied from Finder / Explorer)
+  const realFiles = Array.from(clipboardData.files).filter((f) => f.size > 0);
+  if (realFiles.length > 0) return realFiles;
+
+  // Case 2: image blob from screenshot or "Copy Image"
+  const imageFiles = [];
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+  let imgIdx = 0;
+  for (const item of Array.from(clipboardData.items)) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+    const blob = item.getAsFile();
+    if (!blob || blob.size === 0) continue;
+    const ext = item.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+    const suffix = imageFiles.length > 0 ? `-${++imgIdx}` : '';
+    const name = `pasted-${ts}${suffix}.${ext}`;
+    imageFiles.push(new File([blob], name, { type: item.type }));
+  }
+  return imageFiles;
+}
+
 export function initFileUpload() {
   const fileInput = $('#file-input');
   const dropOverlay = $('#drop-overlay');
@@ -237,6 +267,29 @@ export function initFileUpload() {
     dropOverlay.classList.remove('visible');
     const files = Array.from(e.dataTransfer.files);
     if (files.length > 0) showUploadConfirm(files);
+  });
+
+  // Paste-to-upload: press Ctrl+V / Cmd+V anywhere on the page to upload a file
+  // copied from the OS file manager. We key off the clipboard *content* (does it
+  // hold files?) rather than mouse position — the common flow is Cmd+Tab back to
+  // the browser then paste, where no pointerenter fires, so a hover requirement
+  // silently breaks it. clipboardData.files is empty when only text is on the
+  // clipboard, so this never disturbs pasting text into the notepad.
+  //
+  // One exception: when the caret is in the notepad textarea AND the clipboard
+  // holds an image, text-sync.js (handleImagePaste) embeds it inline as a
+  // Markdown data-URL. We defer to that path so an image isn't both embedded and
+  // uploaded. Non-image files (PDF, docx, …) always upload.
+  document.addEventListener('paste', (e) => {
+    const files = collectClipboardFiles(e.clipboardData);
+    if (files.length === 0) return;
+
+    const inTextarea = document.activeElement?.id === 'text-input';
+    const allImages = files.every((f) => f.type.startsWith('image/'));
+    if (inTextarea && allImages) return; // handled by text-sync inline-image paste
+
+    e.preventDefault();
+    showUploadConfirm(files);
   });
 }
 
