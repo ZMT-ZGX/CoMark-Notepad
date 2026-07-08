@@ -16,6 +16,12 @@ const { formatBytes, downloadBasename } = require('../utils/file');
 const { MAX_FILE_BYTES } = require('../config');
 const logger = require('../utils/logger');
 
+// A pad is public when it has neither an owner nor a creator code — accessible
+// to anyone. Centralized here so the same definition is reused everywhere.
+function isPublicPad(pad: Pad): boolean {
+  return !pad.ownerUserId && !pad.creatorCode;
+}
+
 class FileService {
   store: DataStore;
   broadcast: Broadcast;
@@ -108,8 +114,17 @@ class FileService {
       res.status(status).json({ error });
     };
 
+    // Detect a genuine client-side abort. `req.on('aborted')` has been deprecated
+    // since Node 16; the supported replacement is `req.on('close')` combined with
+    // a check that the request body was NOT fully received (`req.complete`). We
+    // must NOT key off `req.destroyed`, which also becomes true during the normal
+    // end-of-request teardown once the body has been read — larger multipart
+    // bodies make `close` fire (with destroyed=true) before busboy's `finish`, so
+    // the old check aborted valid uploads mid-write and the request hung forever
+    // waiting on a write promise that never settled.
     req.on('close', () => {
-      if (!finished && req.destroyed && !busboyFinished) {
+      if (req.complete) return; // body fully received → normal completion, not an abort
+      if (!finished && !busboyFinished) {
         aborted = true;
         cleanupPartialFile();
       }
@@ -263,14 +278,25 @@ class FileService {
     if (!pad) throw NotFoundError('Pad not found');
 
     // Permission check
-    if (file.ownerUserId) {
+    const padIsPublic = isPublicPad(pad);
+    if (padIsPublic && userId) {
+      // Public pad (no owner, no creator): any authenticated user may delete
+      // files. Ownership is intentionally ignored — this is a single-user
+      // local notepad, and file ownership is otherwise scattered across the
+      // ephemeral auto-registered identities created on each restart, leaving
+      // the user unable to delete their own older files.
+    } else if (file.ownerUserId) {
       if (userId !== file.ownerUserId && !isAdminUser) {
         if (!this.canManagePad(userId, isAdminUser, pad)) {
           throw ForbiddenError('Access denied');
         }
       }
     } else {
-      if (!this.canManagePad(userId, isAdminUser, pad)) {
+      // Unowned file (e.g. uploaded by a guest to a public pad). The route
+      // already rejects anonymous deletions of unowned files with 401, so here
+      // any authenticated user may remove it. Restricted (owned) pads never
+      // produce unowned files, so this does not weaken private-pad safety.
+      if (!userId && !isAdminUser) {
         throw ForbiddenError('Access denied');
       }
     }
@@ -287,7 +313,13 @@ class FileService {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
 
-    if (!this.canManagePad(userId, isAdminUser, pad)) {
+    // On a public pad (no owner, no creator) any authenticated user may clear
+    // all files, consistent with single-file deletion. Otherwise only a pad
+    // manager (owner/admin) may clear. Anonymous users are always rejected.
+    const canClear = isPublicPad(pad)
+      ? !!userId || isAdminUser
+      : this.canManagePad(userId, isAdminUser, pad);
+    if (!canClear) {
       throw ForbiddenError('Access denied');
     }
 
