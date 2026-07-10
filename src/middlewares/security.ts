@@ -69,7 +69,10 @@ function checkOrigin(req: any, res: any, next: any): void {
  * @param {object} padService - PadService instance
  * @param {function} [padIdResolver] - (req) => number. Defaults to Number(req.params.id)
  */
-function requirePadUnlock(padService: any, padIdResolver?: (req: any) => number): (req: any, res: any, next: any) => void {
+function requirePadUnlock(
+  padService: any,
+  padIdResolver?: (req: any) => number
+): (req: any, res: any, next: any) => void {
   return (req, res, next) => {
     const padId = padIdResolver ? padIdResolver(req) : Number(req.params.id);
     if (!Number.isInteger(padId) || padId <= 0) return next(); // let route handle validation

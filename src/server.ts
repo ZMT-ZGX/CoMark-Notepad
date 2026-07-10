@@ -138,7 +138,9 @@ async function start() {
 
     const { isProduction, PUBLIC_ORIGIN } = require('./config');
     if (isProduction && !PUBLIC_ORIGIN) {
-      logger.warn('PUBLIC_ORIGIN is not set. Origin-based CSRF protection will accept any localhost/LAN origin. Set PUBLIC_ORIGIN in production.');
+      logger.warn(
+        'PUBLIC_ORIGIN is not set. Origin-based CSRF protection will accept any localhost/LAN origin. Set PUBLIC_ORIGIN in production.'
+      );
     }
 
     try {

@@ -15,7 +15,11 @@ class InviteService {
   broadcast: Broadcast;
   getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null;
 
-  constructor(store: DataStore, broadcast: Broadcast, getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null = null) {
+  constructor(
+    store: DataStore,
+    broadcast: Broadcast,
+    getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null = null
+  ) {
     this.store = store;
     this.broadcast = broadcast;
     this.getPadClients = getPadClients;

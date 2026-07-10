@@ -19,7 +19,8 @@ const redeemLimiter = rateLimit({
 const inviteCreateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
-  keyGenerator: (req: any) => req.userId || ipKeyGenerator(req.ip || req.socket.remoteAddress || ''),
+  keyGenerator: (req: any) =>
+    req.userId || ipKeyGenerator(req.ip || req.socket.remoteAddress || ''),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many invitations created.' },

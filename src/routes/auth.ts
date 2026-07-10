@@ -21,33 +21,39 @@ const registerLimiter = rateLimit({
 function createRouter(db: any) {
   const router = express.Router();
 
-  router.post('/register', registerLimiter, checkOrigin, validate(RegisterSchema), (req: any, res: any) => {
-    let code;
-    let attempts = 0;
-    do {
-      code = generateUserCode();
-      attempts++;
-    } while (db.users.exists(code) && attempts < 10);
-    if (db.users.exists(code)) {
-      return res.status(500).json({ error: 'Failed to generate unique user code' });
+  router.post(
+    '/register',
+    registerLimiter,
+    checkOrigin,
+    validate(RegisterSchema),
+    (req: any, res: any) => {
+      let code;
+      let attempts = 0;
+      do {
+        code = generateUserCode();
+        attempts++;
+      } while (db.users.exists(code) && attempts < 10);
+      if (db.users.exists(code)) {
+        return res.status(500).json({ error: 'Failed to generate unique user code' });
+      }
+      db.users.create({ code, createdAt: Date.now() });
+
+      const requested = req.body.expiresInDays;
+      const expiresInDays =
+        Number.isFinite(requested) && requested > 0
+          ? Math.min(Math.floor(requested), SESSION_TOKEN_TTL_DAYS)
+          : SESSION_TOKEN_TTL_DAYS;
+
+      const token = signSessionToken(code, expiresInDays);
+      res.setHeader(
+        'Set-Cookie',
+        `session_token=${token}; ${cookieFlags}; Max-Age=${expiresInDays * 86400}`
+      );
+      // Do not echo the raw token in the response body — it is delivered via
+      // HttpOnly cookie only, which prevents XSS-based token theft.
+      res.json({ code, expiresInDays });
     }
-    db.users.create({ code, createdAt: Date.now() });
-
-    const requested = req.body.expiresInDays;
-    const expiresInDays =
-      Number.isFinite(requested) && requested > 0
-        ? Math.min(Math.floor(requested), SESSION_TOKEN_TTL_DAYS)
-        : SESSION_TOKEN_TTL_DAYS;
-
-    const token = signSessionToken(code, expiresInDays);
-    res.setHeader(
-      'Set-Cookie',
-      `session_token=${token}; ${cookieFlags}; Max-Age=${expiresInDays * 86400}`
-    );
-    // Do not echo the raw token in the response body — it is delivered via
-    // HttpOnly cookie only, which prevents XSS-based token theft.
-    res.json({ code, expiresInDays });
-  });
+  );
 
   router.post('/verify', checkOrigin, validate(VerifySchema), (req: any, res: any) => {
     const { token } = req.body;

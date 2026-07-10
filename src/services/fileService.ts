@@ -27,7 +27,11 @@ class FileService {
   broadcast: Broadcast;
   padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null;
 
-  constructor(store: DataStore, broadcast: Broadcast, padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null) {
+  constructor(
+    store: DataStore,
+    broadcast: Broadcast,
+    padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null
+  ) {
     this.store = store;
     this.broadcast = broadcast;
     this.padService = padService || null;
@@ -138,63 +142,66 @@ class FileService {
     busboy.on('filesLimit', () => fail(400, 'Only one file allowed'));
     busboy.on('partsLimit', () => fail(400, 'Too many form parts'));
 
-    busboy.on('file', (name: string, file: any, info: { filename: string; mimeType: string; encoding: string }) => {
-      if (name !== 'file' || fileSeen) {
-        file.resume();
-        return;
-      }
-      fileSeen = true;
-
-      const originalName = downloadBasename(info.filename, '');
-      if (!originalName) {
-        file.resume();
-        return;
-      }
-
-      const id = generateId();
-      const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
-      const filename = `${id}_${safeName}`;
-      filePath = path.join(this.store.FILES_DIR, filename);
-
-      // Early access check
-      if (padIdField !== null) {
-        const earlyPad = this.store.findPadById(padIdField);
-        if (earlyPad && !this.canAccessPad(req.userId, earlyPad)) {
-          uploadAccessDenied = true;
+    busboy.on(
+      'file',
+      (name: string, file: any, info: { filename: string; mimeType: string; encoding: string }) => {
+        if (name !== 'file' || fileSeen) {
           file.resume();
           return;
         }
+        fileSeen = true;
+
+        const originalName = downloadBasename(info.filename, '');
+        if (!originalName) {
+          file.resume();
+          return;
+        }
+
+        const id = generateId();
+        const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
+        const filename = `${id}_${safeName}`;
+        filePath = path.join(this.store.FILES_DIR, filename);
+
+        // Early access check
+        if (padIdField !== null) {
+          const earlyPad = this.store.findPadById(padIdField);
+          if (earlyPad && !this.canAccessPad(req.userId, earlyPad)) {
+            uploadAccessDenied = true;
+            file.resume();
+            return;
+          }
+        }
+
+        fileInfo = {
+          id,
+          filename,
+          originalName,
+          size: 0,
+          mimeType: (info.mimeType || 'application/octet-stream').toLowerCase(),
+          createdAt: Date.now(),
+          ownerUserId: null,
+          padId: 1,
+        } as import('../types').FileInfo;
+
+        writeStream = fs.createWriteStream(filePath, { flags: 'wx' });
+        fileWritePromise = new Promise((resolve, reject) => {
+          writeStream.on('finish', resolve);
+          writeStream.on('error', reject);
+          file.on('error', reject);
+        });
+        fileWritePromise.catch(() => {});
+
+        file.on('limit', () => {
+          fileLimitReached = true;
+          if (writeStream) writeStream.destroy(new Error('File too large'));
+        });
+
+        file.pipe(writeStream);
+        file.on('data', (chunk: Buffer) => {
+          if (fileInfo) fileInfo.size += chunk.length;
+        });
       }
-
-      fileInfo = {
-        id,
-        filename,
-        originalName,
-        size: 0,
-        mimeType: (info.mimeType || 'application/octet-stream').toLowerCase(),
-        createdAt: Date.now(),
-        ownerUserId: null,
-        padId: 1,
-      } as import('../types').FileInfo;
-
-      writeStream = fs.createWriteStream(filePath, { flags: 'wx' });
-      fileWritePromise = new Promise((resolve, reject) => {
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-        file.on('error', reject);
-      });
-      fileWritePromise.catch(() => {});
-
-      file.on('limit', () => {
-        fileLimitReached = true;
-        if (writeStream) writeStream.destroy(new Error('File too large'));
-      });
-
-      file.pipe(writeStream);
-      file.on('data', (chunk: Buffer) => {
-        if (fileInfo) fileInfo.size += chunk.length;
-      });
-    });
+    );
 
     busboy.on('error', () => fail(400, 'Invalid multipart form data'));
 
@@ -247,7 +254,11 @@ class FileService {
       finalInfo.padId = targetPadId;
 
       this.store.createFile(finalInfo);
-      this.broadcast.toPad(finalInfo.padId, { type: 'file-added', padId: finalInfo.padId, file: finalInfo }, excludeWsId);
+      this.broadcast.toPad(
+        finalInfo.padId,
+        { type: 'file-added', padId: finalInfo.padId, file: finalInfo },
+        excludeWsId
+      );
       finished = true;
       if (!res.headersSent) res.json(finalInfo);
     });
@@ -255,7 +266,11 @@ class FileService {
     req.pipe(busboy);
   }
 
-  async downloadFile(userId: string | null, fileId: string, unlockToken: string | undefined): Promise<{ file: FileInfo; filepath: string }> {
+  async downloadFile(
+    userId: string | null,
+    fileId: string,
+    unlockToken: string | undefined
+  ): Promise<{ file: FileInfo; filepath: string }> {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
     if (!this.canAccessFile(userId, file)) throw NotFoundError('File not found');
@@ -270,7 +285,12 @@ class FileService {
     return { file, filepath };
   }
 
-  async deleteFile(userId: string | null, isAdminUser: boolean, fileId: string, excludeWsId: string | undefined) {
+  async deleteFile(
+    userId: string | null,
+    isAdminUser: boolean,
+    fileId: string,
+    excludeWsId: string | undefined
+  ) {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
 
@@ -305,11 +325,20 @@ class FileService {
     try {
       fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
     } catch {}
-    this.broadcast.toPad(file.padId ?? 1, { type: 'file-deleted', padId: file.padId ?? 1, fileId }, excludeWsId);
+    this.broadcast.toPad(
+      file.padId ?? 1,
+      { type: 'file-deleted', padId: file.padId ?? 1, fileId },
+      excludeWsId
+    );
     return { ok: true };
   }
 
-  async clearFiles(userId: string | null, isAdminUser: boolean, padId: number, excludeWsId: string | undefined) {
+  async clearFiles(
+    userId: string | null,
+    isAdminUser: boolean,
+    padId: number,
+    excludeWsId: string | undefined
+  ) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
 

@@ -18,7 +18,12 @@ const uploadLimiter = rateLimit({
   message: { error: 'Too many uploads.' },
 });
 
-function mountRoutes(app: any, services: any, getServerPort: (() => number) | null, getPadClients: (padId: number) => Set<any> | undefined) {
+function mountRoutes(
+  app: any,
+  services: any,
+  getServerPort: (() => number) | null,
+  getPadClients: (padId: number) => Set<any> | undefined
+) {
   const { db, padService, fileService, inviteService, convertService } = services;
 
   app.use('/api/auth', createAuthRouter(db));
