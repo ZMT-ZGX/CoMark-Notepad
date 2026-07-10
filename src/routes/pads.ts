@@ -34,7 +34,10 @@ const publicPadCreateLimiter = rateLimit({
   message: { error: 'Too many public pad creations.' },
 });
 
-function createRouter(padService: any, getPadClients: (padId: number) => Set<CoMarkWebSocket> | undefined) {
+function createRouter(
+  padService: any,
+  getPadClients: (padId: number) => Set<CoMarkWebSocket> | undefined
+) {
   const router = express.Router();
   const padUnlock = requirePadUnlock(padService);
 
@@ -60,8 +63,19 @@ function createRouter(padService: any, getPadClients: (padId: number) => Set<CoM
     try {
       const padId = Number(req.params.id);
       if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
-      const { text, _wsId } = req.body;
-      const updated = await padService.updateText(req.userId, padId, text, _wsId);
+      const { text, _wsId, baseVersion } = req.body;
+      const updated = await padService.updateText(
+        req.userId,
+        padId,
+        text,
+        _wsId,
+        baseVersion ?? null
+      );
+      if (updated && updated.conflict) {
+        return res
+          .status(409)
+          .json({ conflict: true, text: updated.pad.text, textVersion: updated.pad.textVersion });
+      }
       res.json({ ok: true, textVersion: updated.textVersion });
     } catch (e) {
       next(e);

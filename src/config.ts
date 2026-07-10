@@ -31,8 +31,10 @@ const CONVERT_MAX_BYTES = parsePositiveInt(process.env.CONVERT_MAX_BYTES, 10 * 1
 const CONVERT_TIMEOUT_MS = parsePositiveInt(process.env.CONVERT_TIMEOUT_MS, 60 * 1000); // 60s
 const MAX_PASSWORD_LENGTH = 1024;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
-const MAX_WS_CONNECTIONS = 1000;
-const MAX_WS_CONNECTIONS_PER_IP = 10;
+const MAX_WS_CONNECTIONS = parsePositiveInt(process.env.MAX_WS_CONNECTIONS, 1000);
+// Per-IP cap guards against a single client exhausting the pool. Env-tunable so
+// test harnesses (which drive many browser contexts from 127.0.0.1) can raise it.
+const MAX_WS_CONNECTIONS_PER_IP = parsePositiveInt(process.env.MAX_WS_CONNECTIONS_PER_IP, 10);
 // Per-connection patch rate limit. HTTP writes go through express-rate-limit
 // (60/min); WS messages bypass Express, so we enforce an equivalent cap here.
 const WS_PATCH_WINDOW_MS = parsePositiveInt(process.env.WS_PATCH_WINDOW_MS, 60 * 1000);
@@ -81,15 +83,27 @@ const SESSION_SECRET = (() => {
   try {
     const fs = require('fs');
     const secretFile = path.join(DATA_DIR, '.session_secret');
-    const existing = fs.readFileSync(secretFile, 'utf8').trim();
-    if (existing) return existing;
+    // Reuse an existing secret if one was already persisted. Guard with
+    // existsSync so a missing file (first run) doesn't throw ENOENT and skip
+    // the write below — that bug meant the secret was never actually persisted
+    // and every restart logged users out.
+    if (fs.existsSync(secretFile)) {
+      const existing = fs.readFileSync(secretFile, 'utf8').trim();
+      if (existing) return existing;
+    }
+    // First run: generate and persist. config is evaluated before the store
+    // creates DATA_DIR, so ensure it exists first.
+    fs.mkdirSync(DATA_DIR, { recursive: true });
     const generated = require('crypto').randomBytes(32).toString('hex');
     // 0600 so the HMAC signing key is not world-/group-readable on shared hosts.
     fs.writeFileSync(secretFile, generated, { mode: 0o600 });
     console.error('[config] persisted SESSION_SECRET to', secretFile);
     return generated;
   } catch (e) {
-    console.error('[config] failed to persist SESSION_SECRET:', e instanceof Error ? e.message : String(e));
+    console.error(
+      '[config] failed to persist SESSION_SECRET:',
+      e instanceof Error ? e.message : String(e)
+    );
     return require('crypto').randomBytes(32).toString('hex');
   }
 })();

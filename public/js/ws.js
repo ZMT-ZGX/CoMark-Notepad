@@ -9,11 +9,11 @@
  * public/js/. Callers import them from their dedicated modules directly.
  */
 
-import { state, $, showToast, getPadToken, upsertLocalFile, removeLocalFile } from './core.js';
+import { state, $, showToast, getPadToken, getPadSync, upsertLocalFile, removeLocalFile } from './core.js';
 import { refreshPads, loadPadContent } from './pads.js';
 import { addFileToList, removeFileFromList, updateFilesEmpty } from './files.js';
 import { showUnlockModal } from './modals.js';
-import { applyRemoteText, applyRemotePatch, applyPatchNack, applyTextState, flushPatchQueue, showOfflineBanner, hideOfflineBanner } from './text-sync.js';
+import { applyRemoteText, applyRemotePatch, applyPatchNack, applyTextState, flushPatchQueue, showOfflineBanner, hideOfflineBanner, ackInflight, requeueInflight } from './text-sync.js';
 
 // --- Identity (kept here because it touches state init + pads + ws) ---
 
@@ -67,6 +67,7 @@ export function connectWS() {
   const padToken = getPadToken(state.currentPadId);
   const params = new URLSearchParams({ pad: String(state.currentPadId) });
   const newWs = new WebSocket(`${proto}//${location.host}/?${params}`);
+  newWs.padId = state.currentPadId; // remember which pad this socket belongs to
   state.ws = newWs;
 
   newWs.onopen = () => {
@@ -76,8 +77,10 @@ export function connectWS() {
     state.reconnectAttempts = 0;
     $('#status').className = 'status online';
     $('#status').title = 'Connected';
-    flushPatchQueue();
-    loadPadContent();
+    // Do NOT flush the offline queue / load body here — wait for the server's
+    // `hello` (which proves auth succeeded). Flushing before `hello` on a
+    // locked pad with an invalid unlock token would leak the queue and then
+    // lose it (P1 #2).
   };
 
   newWs.onmessage = (e) => {
@@ -87,25 +90,35 @@ export function connectWS() {
     switch (msg.type) {
       case 'hello':
         state.wsId = msg.wsId;
+        // Auth confirmed (incl. locked-pad unlock token): safe to flush the
+        // offline queue now (P1 #2). Do not race a queued write with a stale
+        // GET snapshot; the patch ACK carries the authoritative body.
+        const helloSync = getPadSync(state.currentPadId);
+        const hasPending = state.getPatchQueue(state.currentPadId).length > 0
+          || !!helloSync.inflight
+          || (helloSync.pendingTarget !== null && helloSync.pendingTarget !== helloSync.lastSyncedText);
+        if (hasPending) flushPatchQueue();
+        else loadPadContent();
         break;
       case 'patch-ack':
-        if (msg.textVersion) state.textVersion = Math.max(state.textVersion, msg.textVersion);
+        if (typeof msg.seq === 'number') ackInflight(msg.seq, state.currentPadId, msg.text, msg.textVersion);
+        if (msg.textVersion) {
+          const sync = getPadSync(state.currentPadId);
+          sync.textVersion = Math.max(sync.textVersion, msg.textVersion);
+        }
         break;
       case 'patch-nack':
         if (msg.padId === state.currentPadId) {
           applyPatchNack(msg.text, msg.textVersion);
-          // Clear pending patch queue — remaining patches were computed against
-          // the old shadow and would all fail against the reset state.
-          state.setPatchQueue([], msg.padId);
         }
         break;
       case 'patch':
         if (msg.padId === state.currentPadId && msg.senderId !== state.wsId) {
-          applyRemotePatch(msg.data, msg.textVersion);
+          applyRemotePatch(msg.data, msg.textVersion, state.currentPadId, msg.text, msg.operationId);
         }
         break;
       case 'text-update':
-        if (msg.padId === state.currentPadId) applyRemoteText(msg.text, msg.textVersion);
+        if (msg.padId === state.currentPadId) applyRemoteText(msg.text, msg.textVersion, state.currentPadId, true);
         break;
       case 'file-added':
         upsertLocalFile(msg.file);
@@ -128,6 +141,11 @@ export function connectWS() {
 
   newWs.onclose = (e) => {
     if (state.ws !== newWs) return;
+    // Fold any in-flight / unsent edits back into the offline queue for THIS
+    // socket's pad before reconnecting, so a dropped connection can't lose
+    // local typing — and (on a pad switch) the old socket can't fold its
+    // in-flight patch into the newly-active pad (P1 #3).
+    try { requeueInflight(newWs.padId); } catch {}
     $('#status').className = 'status offline';
     $('#status').title = 'Disconnected - reconnecting...';
     $('#online-count').textContent = '0';

@@ -25,9 +25,20 @@ All notable changes to this project are documented in this file. Versions follow
 - **CSP 调整** — `app.ts` `scriptSrc` 重新允许 `https://cdn.jsdelivr.net`（alloyfinger 经 CDN 加载且已配 SRI `integrity`）。
 - **匿名删除统一 401** — `routes/files.ts` 对任意文件的匿名删除返回 401（原仅对无主文件）。
 
+### 可靠投递状态机重构（每 Pad 隔离、单 in-flight）
+
+将前端的协同同步模型从「全局 shadow + 多个并行未 ACK patch」改为 **每 Pad 一个 confirmed shadow + 一个 in-flight operation + 一个 pending target text**（`state.padSync[padId]`），彻底消除在全局数组与并行 patch 上反复补状态的脆弱性。修复 6 个可靠投递问题：
+
+- **P1 并行 patch 串文** — `text-sync.js` 仅在 ACK 后才推进 shadow 并计算下一条；同一 shadow 上只允许一个 in-flight，避免 `""→"A"` 与 `""→"AB"` 并发时被服务端依次应用成 `AAB`。
+- **P1 上锁 Pad 认证失败丢队列** — 离线入队不再提前推进 shadow；队列改为在认证完成的 `hello` 之后才 flush，invalid unlock token 时队列完整保留。
+- **P1 切换 Pad 串号** — `switchPad` 在切换前先把旧 Pad 的 in-flight / 待发送文本折叠回其离线队列；每个 WS 实例记录所属 `padId`，断线重排只处理自己的 Pad，旧 socket 的 `onclose` 因实例检查直接返回，不会把旧 patch 串入新 Pad。
+- **P1 旧 Pad HTTP 响应写新 Pad** — `requestToken` 改为每 Pad 单调递增、永不复位；409 合并路径捕获并贯穿原始 `padId` + `sync`，陈旧响应（来自旧 Pad）直接丢弃。
+- **P2 旧 GET 覆盖新 WS** — `applyTextState` 增加版本守卫，版本低于当前确认的 GET 不再覆盖正文（防止 WS v11 先到、GET v10 后到导致持有 v10 却标记 v11）。
+- **P2 图片 2MB 上限与 100k 字符服务端限制冲突** — 粘贴内嵌前按 base64 长度（>75KB）提前拦截并提示，新增 E2E 覆盖该边界（~60KB PNG 被拒、正文不变）。
+
 ### Test Coverage
 
-- 72/72 测试全部通过
+- 74/74 单元测试 + 17 E2E 全部通过
 - typecheck + lint 零错误
 
 ---

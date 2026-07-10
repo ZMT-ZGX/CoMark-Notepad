@@ -5,6 +5,7 @@ import { z } from 'zod';
 const UpdateTextSchema = z.object({
   text: z.string().max(100000),
   _wsId: z.string().optional(),
+  baseVersion: z.number().int().nonnegative().optional(),
 });
 
 const SetPasswordSchema = z.object({

@@ -10,7 +10,11 @@ const errorHandler = require('./middlewares/errorHandler');
 const { mountRoutes } = require('./routes');
 const logger = require('./utils/logger');
 
-function createApp(services: any, getServerPort: (() => number) | null, getPadClients: (padId: number) => Set<any> | undefined) {
+function createApp(
+  services: any,
+  getServerPort: (() => number) | null,
+  getPadClients: (padId: number) => Set<any> | undefined
+) {
   const app = express();
   app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 0));
   app.disable('x-powered-by');
@@ -91,11 +95,17 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
   // Full-text search (FTS5) — scoped to pads the current user can access
   app.get('/api/search', (req: any, res: any, next: any) => {
     try {
-      const raw = String(req.query.q || '').trim().slice(0, 200);
+      const raw = String(req.query.q || '')
+        .trim()
+        .slice(0, 200);
       if (!raw) return res.json({ results: [] });
       // Build MATCH query: wrap each token in quotes for phrase search,
       // AND them together so multi-term narrows results.
-      const tokens = raw.split(/\s+/).filter(Boolean).map((t) => `"${t.replace(/"/g, '""')}"`).join(' AND ');
+      const tokens = raw
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((t) => `"${t.replace(/"/g, '""')}"`)
+        .join(' AND ');
       const db = services.db;
       const { padService } = services;
       const rows = db.searchPads(tokens);
@@ -104,6 +114,12 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
         .map((r: any) => {
           const pad = db.pads.findById(r.id);
           if (!pad || !padService.canAccessPad(req.userId, pad)) return null;
+          // Password-protected pads: their body must not leak through search
+          // unless the requester has unlocked THIS pad for THIS request. A
+          // public pad with a password is still "accessible" (canAccessPad
+          // returns true for public pads) but its content stays gated.
+          const padToken = req.query.padToken || req.headers['x-pad-token'];
+          if (pad.password && !padService.isValidUnlockToken(padToken, pad.id)) return null;
           return {
             id: r.id,
             content: r.content,

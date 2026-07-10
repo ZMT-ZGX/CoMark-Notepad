@@ -78,13 +78,18 @@ export interface WsPatch {
   type: 'patch';
   padId: number;
   data: string;
+  text?: string;
   textVersion: number;
   senderId: string | null;
+  operationId?: string;
+  baseVersion?: number;
 }
 
 export interface WsPatchAck {
   type: 'patch-ack';
   textVersion: number;
+  text?: string;
+  seq?: number;
 }
 
 // Server → sender only. Issued when a patch fails to apply (concurrent

@@ -15,17 +15,25 @@ export async function fetchPadContent(padId) {
   return fetch(`/api/pads/${padId}`, { headers });
 }
 
-export async function updatePadText(padId, text, wsId) {
+export async function updatePadText(padId, text, wsId, baseVersion) {
   const token = getPadToken(padId);
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['X-Pad-Token'] = token;
+  const body = { text, _wsId: wsId };
+  if (baseVersion != null) body.baseVersion = baseVersion;
   const res = await fetch(`/api/pads/${padId}/text`, {
     method: 'PUT',
     headers,
-    body: JSON.stringify({ text, _wsId: wsId }),
+    body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error('Failed to sync text');
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error('Failed to sync text');
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
 }
 
 export async function createPadApi() {

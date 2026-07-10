@@ -17,8 +17,12 @@ test.describe('Basic functionality', () => {
 
   test('user code is assigned on load', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('#user-code-badge')).toBeVisible();
-    await expect(page.locator('#user-code-display')).not.toBeEmpty();
+    // A user code is assigned on connect and cached in sessionStorage (there is
+    // no dedicated on-screen badge — the identity surfaces via the invite flow).
+    await expect(page.locator('#status')).toHaveClass(/online/);
+    await expect
+      .poll(() => page.evaluate(() => sessionStorage.getItem('userCode')), { timeout: 10000 })
+      .toMatch(/\S/);
   });
 
   test('typing updates text stats', async ({ page }) => {

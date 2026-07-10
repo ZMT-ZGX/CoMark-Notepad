@@ -15,7 +15,9 @@ function findAll(): Pad[] {
   return db.prepare('SELECT * FROM pads ORDER BY id').all().map(rowToPad);
 }
 
-function create(pad: Partial<Pad> & { ownerUserId?: string | null; creatorCode?: string | null }): Pad | undefined {
+function create(
+  pad: Partial<Pad> & { ownerUserId?: string | null; creatorCode?: string | null }
+): Pad | undefined {
   const db = sqlite.getDb();
   const createdAt = Date.now();
 
@@ -53,16 +55,20 @@ function remove(id: number): void {
  * Full-text search via FTS5 (trigram tokenizer).
  * Returns padId + content (truncated to 200 chars).
  */
-function searchPads(matchQuery: string): Array<{ id: number; content: string; ownerUserId: string | null }> {
+function searchPads(
+  matchQuery: string
+): Array<{ id: number; content: string; ownerUserId: string | null }> {
   const db = sqlite.getDb();
   // bm25() gives relevance ranking; lower score = better match.
+  // FTS5 requires the MATCH / bm25() operand to reference the virtual table by
+  // its actual name (aliasing it as `s MATCH` fails with "no such column: s").
   const rows = db
     .prepare(
       `SELECT s.id, substr(s.content, 1, 200) as content, p.owner_user_id as ownerUserId
        FROM pad_search s
        JOIN pads p ON p.id = s.id
-       WHERE s MATCH ?
-       ORDER BY bm25(s)
+       WHERE pad_search MATCH ?
+       ORDER BY bm25(pad_search)
        LIMIT 20`
     )
     .all(matchQuery);
@@ -76,18 +82,18 @@ function searchPads(matchQuery: string): Array<{ id: number; content: string; ow
 function searchSnippet(matchQuery: string, padId?: number): string {
   const db = sqlite.getDb();
   try {
-    const sql = padId != null
-      ? `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
+    const sql =
+      padId != null
+        ? `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
          FROM pad_search
          WHERE pad_search MATCH ? AND id = ?
          LIMIT 1`
-      : `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
+        : `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
          FROM pad_search
          WHERE pad_search MATCH ?
          LIMIT 1`;
-    const row = padId != null
-      ? db.prepare(sql).get(matchQuery, padId)
-      : db.prepare(sql).get(matchQuery);
+    const row =
+      padId != null ? db.prepare(sql).get(matchQuery, padId) : db.prepare(sql).get(matchQuery);
     return row?.snippet || '';
   } catch {
     return '';

@@ -24,7 +24,10 @@ const {
 const PATCH_WINDOW_MS = WS_PATCH_WINDOW_MS;
 const MAX_PATCHES_PER_WINDOW = MAX_WS_PATCHES_PER_WINDOW;
 
-function initWSS(server: any, padService: any): { wss: any; heartbeatTimer: ReturnType<typeof setInterval> } {
+function initWSS(
+  server: any,
+  padService: any
+): { wss: any; heartbeatTimer: ReturnType<typeof setInterval> } {
   // Cap inbound frame size so a single oversized WS message can't exhaust
   // server memory. WS frames bypass Express's JSON body-size limit, so this
   // is the only guard against a huge patch frame.
@@ -98,16 +101,27 @@ function initWSS(server: any, padService: any): { wss: any; heartbeatTimer: Retu
       ws.patchCount = 0;
       connections.add(ws, { clientId: ws.clientId, padId, userId: ws.userId, ipAddress: clientIp });
 
-      ws.on('pong', () => { ws.isAlive = true; });
+      ws.on('pong', () => {
+        ws.isAlive = true;
+      });
       ws.on('close', () => {
         connections.remove(ws);
-        broadcast.toPad(padId, { type: 'online-count', padId, count: connections.getPadCount(padId) });
+        broadcast.toPad(padId, {
+          type: 'online-count',
+          padId,
+          count: connections.getPadCount(padId),
+        });
       });
       ws.on('error', () => connections.remove(ws));
       ws.on('message', (raw: Buffer) => {
         let msg;
-        try { msg = JSON.parse(raw as unknown as string); } catch { return; }
+        try {
+          msg = JSON.parse(raw as unknown as string);
+        } catch {
+          return;
+        }
         if (msg.type === 'patch' && padService) {
+          if (msg.padId !== padId) return;
           // Per-connection patch rate limit (DoS hardening — HTTP write path
           // has express-rate-limit, but WS messages bypass Express entirely).
           const now = Date.now();
@@ -122,31 +136,47 @@ function initWSS(server: any, padService: any): { wss: any; heartbeatTimer: Retu
               clientId: ws.clientId,
               count: ws.patchCount,
             });
-            try { ws.close(4001, 'Patch rate limit exceeded'); } catch {}
+            try {
+              ws.close(4001, 'Patch rate limit exceeded');
+            } catch {}
             return;
           }
 
-          padService.applyPatch(ws.userId, padId, msg.data, ws.clientId)
+          padService
+            .applyPatch(
+              ws.userId,
+              padId,
+              msg.data,
+              ws.clientId,
+              typeof msg.operationId === 'string' ? msg.operationId : null,
+              typeof msg.baseVersion === 'number' ? msg.baseVersion : null
+            )
             .then((result: any) => {
               if (!result) return; // pad not found / access denied — silently drop
               try {
                 if (result.ok) {
-                  ws.send(JSON.stringify({
-                    type: 'patch-ack',
-                    textVersion: result.pad.textVersion,
-                  }));
+                  ws.send(
+                    JSON.stringify({
+                      type: 'patch-ack',
+                      textVersion: result.pad.textVersion,
+                      text: result.pad.text,
+                      seq: msg.seq,
+                    })
+                  );
                 } else {
                   // Patch failed to apply (concurrent conflict or malformed).
                   // Send the authoritative full text back to the sender so its
                   // shadow resets. Uses a dedicated 'patch-nack' (not text-update)
                   // so the client applies it immediately even while focused,
                   // bypassing the deferred-merge path that could drop the reset.
-                  ws.send(JSON.stringify({
-                    type: 'patch-nack',
-                    padId,
-                    text: result.pad.text,
-                    textVersion: result.pad.textVersion,
-                  }));
+                  ws.send(
+                    JSON.stringify({
+                      type: 'patch-nack',
+                      padId,
+                      text: result.pad.text,
+                      textVersion: result.pad.textVersion,
+                    })
+                  );
                 }
               } catch {}
             })
@@ -155,7 +185,11 @@ function initWSS(server: any, padService: any): { wss: any; heartbeatTimer: Retu
       });
 
       ws.send(JSON.stringify({ type: 'hello', wsId: ws.clientId, padId, userId: ws.userId }));
-      broadcast.toPad(padId, { type: 'online-count', padId, count: connections.getPadCount(padId) });
+      broadcast.toPad(padId, {
+        type: 'online-count',
+        padId,
+        count: connections.getPadCount(padId),
+      });
     }
 
     // Password-protected pad: token sent as first WebSocket message (not in URL)
@@ -167,8 +201,17 @@ function initWSS(server: any, padService: any): { wss: any; heartbeatTimer: Retu
       ws.once('message', (raw: Buffer) => {
         clearTimeout(authTimer);
         let msg;
-        try { msg = JSON.parse(raw as unknown as string); } catch { ws.close(4400, 'Invalid message'); return; }
-        if (msg.type !== 'auth' || !padService || !padService.isValidUnlockToken(msg.padToken, padId)) {
+        try {
+          msg = JSON.parse(raw as unknown as string);
+        } catch {
+          ws.close(4400, 'Invalid message');
+          return;
+        }
+        if (
+          msg.type !== 'auth' ||
+          !padService ||
+          !padService.isValidUnlockToken(msg.padToken, padId)
+        ) {
           ws.close(4403, 'Pad locked');
           return;
         }

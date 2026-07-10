@@ -1,6 +1,13 @@
 'use strict';
 
-import type { DataStore, Broadcast, UnlockTokenEntry, CoMarkWebSocket, Pad, FileInfo } from '../types';
+import type {
+  DataStore,
+  Broadcast,
+  UnlockTokenEntry,
+  CoMarkWebSocket,
+  Pad,
+  FileInfo,
+} from '../types';
 const path = require('path');
 const fs = require('fs');
 const logger = require('../utils/logger');
@@ -25,17 +32,26 @@ class PadService {
   // Reuse a single diff-match-patch instance across applyPatch calls to
   // avoid rebuilding its internal tables on every incoming patch.
   dmp: any;
+  patchReceipts: Map<string, { padId: number; expires: number }>;
 
-  constructor(store: DataStore, broadcast: Broadcast, getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null = null) {
+  constructor(
+    store: DataStore,
+    broadcast: Broadcast,
+    getPadClients: ((padId: number) => Set<CoMarkWebSocket> | undefined) | null = null
+  ) {
     this.store = store;
     this.broadcast = broadcast;
     this.getPadClients = getPadClients;
     this.dmp = new DiffMatchPatch();
+    this.patchReceipts = new Map();
     this.unlockTokens = new Map();
     this.unlockCleanupTimer = setInterval(() => {
       const now = Date.now();
       for (const [token, entry] of this.unlockTokens) {
         if (now > entry.expires) this.unlockTokens.delete(token);
+      }
+      for (const [operationId, entry] of this.patchReceipts) {
+        if (now > entry.expires) this.patchReceipts.delete(operationId);
       }
     }, 600000);
     this.unlockCleanupTimer.unref?.();
@@ -116,7 +132,14 @@ class PadService {
   // from failure and send an appropriate ack/nack to the sender. On failure,
   // `pad` carries the authoritative server state so the client can reset its
   // shadow and avoid permanent divergence.
-  async applyPatch(userId: string | null, padId: number, patchText: string, excludeWsId: string | null) {
+  async applyPatch(
+    userId: string | null,
+    padId: number,
+    patchText: string,
+    excludeWsId: string | null,
+    operationId: string | null = null,
+    baseVersion: number | null = null
+  ) {
     const pad = this.store.findPadById(padId);
     if (!pad) {
       logger.warn('applyPatch: pad not found', { padId });
@@ -125,6 +148,22 @@ class PadService {
     if (!this.canAccessPad(userId, pad)) {
       logger.warn('applyPatch: access denied', { padId, userId });
       return null;
+    }
+
+    if (operationId) {
+      const receipt = this.patchReceipts.get(operationId);
+      if (receipt && receipt.padId === padId) {
+        // The database may already contain this operation if its ACK was lost.
+        return { ok: true, duplicate: true, pad };
+      }
+    }
+
+    // A patch is only safe against the document version it was diffed from.
+    // Reject stale patches so the client can merge its intended full text via
+    // the conditional HTTP path instead of applying an operation to a
+    // different document and silently overwriting a concurrent edit.
+    if (baseVersion != null && pad.textVersion !== baseVersion) {
+      return { ok: false, pad };
     }
 
     const dmp = this.dmp;
@@ -141,24 +180,74 @@ class PadService {
       return { ok: false, pad };
     }
 
+    // Enforce the same body-size ceiling the HTTP path enforces in the Zod
+    // schema (100k chars). WS frames bypass Express body parsing, so without
+    // this an anonymous client could grow the pad / FTS index without bound.
+    if (newText.length > 100000) {
+      logger.warn('applyPatch: resulting text exceeds 100000 char limit', {
+        padId,
+        length: newText.length,
+      });
+      return { ok: false, pad };
+    }
+
     const updated = this.store.updatePadText(padId, newText);
     if (!updated) {
       logger.warn('applyPatch: updatePadText returned null', { padId });
       return { ok: false, pad };
     }
 
+    if (operationId) {
+      this.patchReceipts.set(operationId, { padId, expires: Date.now() + 24 * 60 * 60 * 1000 });
+      while (this.patchReceipts.size > 10000) {
+        const oldest = this.patchReceipts.keys().next().value;
+        if (!oldest) break;
+        this.patchReceipts.delete(oldest);
+      }
+    }
+
     this.broadcast.toPad(
       padId,
-      { type: 'patch', padId, data: patchText, textVersion: updated.textVersion, senderId: excludeWsId || null },
+      {
+        type: 'patch',
+        padId,
+        data: patchText,
+        text: updated.text,
+        textVersion: updated.textVersion,
+        senderId: excludeWsId || null,
+        operationId: operationId || undefined,
+      },
+      excludeWsId
+    );
+    // Also publish the authoritative body. A client may receive concurrent
+    // patch frames out of version order; the full snapshot lets it converge
+    // without relying on every peer sharing the same patch base.
+    this.broadcast.toPad(
+      padId,
+      { type: 'text-update', padId, text: updated.text, textVersion: updated.textVersion },
       excludeWsId
     );
     return { ok: true, pad: updated };
   }
 
-  async updateText(userId: string | null, padId: number, text: string, excludeWsId: string | null) {
+  async updateText(
+    userId: string | null,
+    padId: number,
+    text: string,
+    excludeWsId: string | null,
+    baseVersion: number | null = null
+  ) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
     if (!this.canAccessPad(userId, pad)) throw ForbiddenError('Access denied');
+
+    // Conditional update: the HTTP full-text fallback only overwrites when the
+    // client's base version still matches the server's. A mismatch means
+    // another client edited in the meantime — blindly overwriting would erase
+    // their work, so we report a conflict and let the client merge instead.
+    if (baseVersion != null && pad.textVersion !== baseVersion) {
+      return { ok: false, conflict: true, pad };
+    }
 
     const updated = this.store.updatePadText(padId, text);
     if (!updated) throw NotFoundError('Pad not found');
@@ -263,7 +352,9 @@ class PadService {
     for (const file of filesToDelete) {
       try {
         fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
-      } catch { /* file may have already been removed */ }
+      } catch {
+        /* file may have already been removed */
+      }
     }
     if (filesToDelete.length > 0) {
       this.store.removeFilesMany(filesToDelete.map((f) => f.id));
