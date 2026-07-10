@@ -67,7 +67,9 @@ async function init() {
   initQR();
   initExport();
   initBeforeUnload();
-  initShortcuts(hotkeys);
+  // CDN-loaded optional dependency: a failed network/SRI load must not abort
+  // the rest of application initialization.
+  initShortcuts(globalThis.hotkeys);
   initGestures();
   initSearch();
 
