@@ -75,6 +75,13 @@ function searchPads(
   return rows;
 }
 
+// Private-use delimiters (U+E000 / U+E001) so the client can re-wrap matches
+// in <mark> after HTML-escaping the rest. Using real <mark> here would be
+// indistinguishable from user-authored "<mark>" in pad text and enable XSS
+// after un-escape.
+const SNIPPET_MARK_OPEN = '\uE000';
+const SNIPPET_MARK_CLOSE = '\uE001';
+
 /**
  * Return a highlighted snippet of the pad text centered on the first match,
  * using FTS5's built-in snippet() helper. Returns '' if no match.
@@ -84,11 +91,11 @@ function searchSnippet(matchQuery: string, padId?: number): string {
   try {
     const sql =
       padId != null
-        ? `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
+        ? `SELECT snippet(pad_search, 2, '${SNIPPET_MARK_OPEN}', '${SNIPPET_MARK_CLOSE}', '…', 32) AS snippet
          FROM pad_search
          WHERE pad_search MATCH ? AND id = ?
          LIMIT 1`
-        : `SELECT snippet(pad_search, 2, '<mark>', '</mark>', '…', 32) AS snippet
+        : `SELECT snippet(pad_search, 2, '${SNIPPET_MARK_OPEN}', '${SNIPPET_MARK_CLOSE}', '…', 32) AS snippet
          FROM pad_search
          WHERE pad_search MATCH ?
          LIMIT 1`;

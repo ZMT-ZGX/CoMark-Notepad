@@ -15,6 +15,7 @@ const { generateId } = require('../utils/crypto');
 const { formatBytes, downloadBasename } = require('../utils/file');
 const { MAX_FILE_BYTES } = require('../config');
 const logger = require('../utils/logger');
+const { extractPadTokens, hasValidUnlockToken } = require('../middlewares/security');
 
 // A pad is public when it has neither an owner nor a creator code — accessible
 // to anyone. Centralized here so the same definition is reused everywhere.
@@ -64,8 +65,8 @@ class FileService {
 
   getPadForFileById(fileId: string): Pad | null {
     const file = this.store.findFileById(fileId);
-    if (!file) return null;
-    return this.store.findPadById(file.padId ?? 1) || null;
+    if (!file || file.padId == null) return null;
+    return this.store.findPadById(file.padId) || null;
   }
 
   async upload(req: any, res: any) {
@@ -236,14 +237,12 @@ class FileService {
       // Authoritative access check
       if (!this.canAccessPad(req.userId, targetPad)) return fail(403, 'Access denied');
 
-      // Pad lock check
+      // Pad lock check — header only (query tokens land in access / proxy logs).
+      // Use shared extractPadTokens so comma-separated multi-token headers work.
       if (
         targetPad.password &&
         (!this.padService ||
-          !this.padService.isValidUnlockToken(
-            req.headers['x-pad-token'] || req.query?.padToken,
-            targetPad.id
-          ))
+          !hasValidUnlockToken(this.padService, extractPadTokens(req), targetPad.id))
       ) {
         return fail(403, 'Pad locked');
       }
@@ -269,15 +268,18 @@ class FileService {
   async downloadFile(
     userId: string | null,
     fileId: string,
-    unlockToken: string | undefined
+    unlockTokens: string[] = []
   ): Promise<{ file: FileInfo; filepath: string }> {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
     if (!this.canAccessFile(userId, file)) throw NotFoundError('File not found');
-    const pad = this.store.findPadById(file.padId ?? 1);
+    // Do not coerce missing padId to 1 — that mis-attributes lock checks.
+    if (file.padId == null) throw NotFoundError('File not found');
+    const pad = this.store.findPadById(file.padId);
+    if (!pad) throw NotFoundError('File not found');
     if (
-      pad?.password &&
-      (!this.padService || !this.padService.isValidUnlockToken(unlockToken, pad.id))
+      pad.password &&
+      (!this.padService || !hasValidUnlockToken(this.padService, unlockTokens, pad.id))
     ) {
       throw ForbiddenError('Pad locked');
     }
@@ -293,8 +295,9 @@ class FileService {
   ) {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
+    if (file.padId == null) throw NotFoundError('File not found');
 
-    const pad = this.store.findPadById(file.padId ?? 1);
+    const pad = this.store.findPadById(file.padId);
     if (!pad) throw NotFoundError('Pad not found');
 
     // Permission check
@@ -326,8 +329,8 @@ class FileService {
       fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
     } catch {}
     this.broadcast.toPad(
-      file.padId ?? 1,
-      { type: 'file-deleted', padId: file.padId ?? 1, fileId },
+      file.padId,
+      { type: 'file-deleted', padId: file.padId, fileId },
       excludeWsId
     );
     return { ok: true };

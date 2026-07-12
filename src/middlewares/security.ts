@@ -65,6 +65,26 @@ function checkOrigin(req: any, res: any, next: any): void {
 }
 
 /**
+ * Read unlock token(s) from the X-Pad-Token header only.
+ * Query-string tokens are intentionally unsupported — they land in access /
+ * proxy logs. Multiple tokens may be comma-separated (search / state).
+ */
+function extractPadTokens(req: any): string[] {
+  const raw = req.headers && req.headers['x-pad-token'];
+  if (!raw) return [];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string' || !value) return [];
+  return value
+    .split(',')
+    .map((s: string) => s.trim())
+    .filter(Boolean);
+}
+
+function hasValidUnlockToken(padService: any, tokens: string[], padId: number): boolean {
+  return tokens.some((t) => padService.isValidUnlockToken(t, padId));
+}
+
+/**
  * Factory: returns middleware that checks pad lock (password-protected pads).
  * @param {object} padService - PadService instance
  * @param {function} [padIdResolver] - (req) => number. Defaults to Number(req.params.id)
@@ -78,8 +98,8 @@ function requirePadUnlock(
     if (!Number.isInteger(padId) || padId <= 0) return next(); // let route handle validation
     const pad = padService.getPadById(padId);
     if (!pad || !pad.password) return next(); // no lock — proceed
-    const token = req.headers['x-pad-token'] || (req.query && req.query.padToken);
-    if (!padService.isValidUnlockToken(token, pad.id)) {
+    const tokens = extractPadTokens(req);
+    if (!hasValidUnlockToken(padService, tokens, pad.id)) {
       return res.status(403).json({ error: 'Pad locked', hasPassword: true });
     }
     next();
@@ -89,6 +109,8 @@ function requirePadUnlock(
 module.exports = {
   checkOrigin,
   requirePadUnlock,
+  extractPadTokens,
+  hasValidUnlockToken,
   isAllowedOrigin,
   isPrivateIp,
 };

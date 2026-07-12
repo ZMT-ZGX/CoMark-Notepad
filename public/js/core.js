@@ -55,7 +55,7 @@ export const state = {
     try { localStorage.setItem(this.patchQueueKey(padId), JSON.stringify(q)); } catch {}
   },
   convertCapabilities: {
-    maxBytes: 10 * 1024 * 1024,
+    maxBytes: 100 * 1024 * 1024,
     timeoutMs: 60 * 1000,
     extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'csv', 'txt', 'log', 'html', 'htm', 'json', 'xml', 'yaml', 'yml', 'jpg', 'jpeg', 'png', 'gif'],
     features: { pptx: true, imageMetadata: true, imageCaption: false, ocr: false },
@@ -87,6 +87,14 @@ export function getPadToken(padId) {
   try { return JSON.parse(sessionStorage.getItem('pad-tokens') || '{}')[padId] || null; } catch { return null; }
 }
 
+export function getAllPadTokens() {
+  try {
+    return Object.values(JSON.parse(sessionStorage.getItem('pad-tokens') || '{}')).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export function setPadToken(padId, token) {
   try {
     const tokens = JSON.parse(sessionStorage.getItem('pad-tokens') || '{}');
@@ -94,6 +102,20 @@ export function setPadToken(padId, token) {
     else delete tokens[padId];
     sessionStorage.setItem('pad-tokens', JSON.stringify(tokens));
   } catch {}
+}
+
+// Build request headers carrying X-Pad-Token. Pass a padId for that pad's
+// token, or omit it to send every stored unlock token (search / state).
+export function padAuthHeaders(padId, base = {}) {
+  const headers = { ...base };
+  if (padId != null) {
+    const token = getPadToken(padId);
+    if (token) headers['X-Pad-Token'] = token;
+  } else {
+    const tokens = getAllPadTokens();
+    if (tokens.length) headers['X-Pad-Token'] = tokens.join(',');
+  }
+  return headers;
 }
 
 // --- Pad Data Operations ---

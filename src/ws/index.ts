@@ -90,11 +90,14 @@ function initWSS(
       return;
     }
 
-    function finalizeConnection() {
+    function finalizeConnection(unlockToken: string | null = null) {
       ws.ipAddress = clientIp;
       ws.clientId = generateId();
       ws.padId = padId;
       ws.isAlive = true;
+      // Remember the unlock token presented at connect so every subsequent
+      // patch can re-validate it (token may expire or be revoked mid-session).
+      ws.unlockToken = unlockToken;
       // Patch rate-limit window state (fixed window, reset on first message
       // of each 60s interval). See message handler below.
       ws.patchWindowStart = Date.now();
@@ -149,11 +152,22 @@ function initWSS(
               msg.data,
               ws.clientId,
               typeof msg.operationId === 'string' ? msg.operationId : null,
-              typeof msg.baseVersion === 'number' ? msg.baseVersion : null
+              typeof msg.baseVersion === 'number' ? msg.baseVersion : null,
+              ws.unlockToken || null
             )
             .then((result: any) => {
-              if (!result) return; // pad not found / access denied — silently drop
+              if (!result) return;
               try {
+                if (result.notFound || result.denied) {
+                  // Pad gone or access revoked mid-session — drop quietly.
+                  return;
+                }
+                if (result.locked) {
+                  // Unlock token expired or revoked — drop the connection so
+                  // the client re-auths rather than looping nacks forever.
+                  ws.close(4403, 'Pad locked');
+                  return;
+                }
                 if (result.ok) {
                   ws.send(
                     JSON.stringify({
@@ -215,10 +229,10 @@ function initWSS(
           ws.close(4403, 'Pad locked');
           return;
         }
-        finalizeConnection();
+        finalizeConnection(typeof msg.padToken === 'string' ? msg.padToken : null);
       });
     } else {
-      finalizeConnection();
+      finalizeConnection(null);
     }
   });
 

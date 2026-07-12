@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] - 2026-07-12
+
+### Security Hardening（Pad unlock / 搜索 / 转换）
+
+基于代码审查的安全加固与行为对齐：
+
+1. **搜索片段 XSS 修复（Critical）** — FTS5 `snippet()` 不再用字面量 `<mark>` 包裹用户正文（用户可写入 `</mark>…` 绕过 escape-then-restore）。服务端改用私有区定界符 `U+E000` / `U+E001`；客户端先 `escapeHtml` 全文，再只把定界符还原为 `<mark>`。
+2. **Unlock token 全面禁止 query 串** — `requirePadUnlock`、文件下载/上传、搜索、`/api/state` 只认 `X-Pad-Token` header。客户端下载/预览改为 `fetch + header + blob URL`；`beforeunload` 兜底写入改用 `fetch({ keepalive: true })` 带 `X-Pad-Token` 头（`sendBeacon` 无法带请求头，故弃用），body 超 60KB 时跳过，由按 pad 隔离的离线队列兜底（写 localStorage，重连补发）。
+3. **多 token header** — `X-Pad-Token` 支持逗号分隔多个 unlock token；`extractPadTokens` / `hasValidUnlockToken` 在 search、state、download、upload、改密路径共用。
+4. **搜索 + state 门禁** — 加锁 Pad 的正文/snippet 不出现在搜索结果中，除非请求携带该 Pad 的有效 unlock token；`/api/state` 同样隐藏加锁 Pad 的文件元数据。客户端搜索/state 自动附带全部已存 token；解锁成功后 `refreshPads()` 立即刷新文件列表。
+5. **WS 写路径复检锁** — 建连时把 unlock token 存到 `ws.unlockToken`；每次 `applyPatch` 再校验，失效返回 `{ locked: true }` 并由服务端 `close(4403, 'Pad locked')`。`applyPatch` 统一返回结构体（`ok` / `notFound` / `denied` / `locked`），不再混用 `null`。
+6. **`padId` 误归属收紧** — 服务层去掉 `file.padId ?? 1` 的强制默认，避免挂到错误 Pad；无 `padId` 的遗留/孤儿文件改回仅按 `canAccessFile` 鉴权显示（既不泄漏加锁 Pad 元数据，也不再误隐藏可访问文件）。加锁 Pad 的文件元数据在未携带有效 unlock token 前仍对 `/api/state` 不可见。
+7. **`CONVERT_MAX_BYTES` 默认 100MB** — 与上传上限对齐（原 10MB）；客户端 `convertCapabilities.maxBytes` 与 README 同步。可用环境变量覆盖。
+
+### Test Coverage
+
+- 74/74 单元测试通过；`tsc --noEmit` 零错误
+
+---
+
 ## [1.1.2] - 2026-07-08
 
 ### 公开 Pad 文件删除权限放宽（有意为之）

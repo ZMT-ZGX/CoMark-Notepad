@@ -113,14 +113,31 @@ class PadService {
     return pad;
   }
 
-  async getState(userId: string | null) {
+  async getState(userId: string | null, unlockTokens: string[] = []) {
     const hasGrantFn = this.store.hasAccessGrant.bind(this.store);
     const pads = this.store.findAllPads();
     const files = this.store.findAllFiles();
     const accessiblePads = pads.filter((p) => canAccessPad(userId, p, hasGrantFn));
-    const accessibleFiles = files.filter((f) =>
-      canAccessFile(userId, f, this.store.findPadById.bind(this.store), hasGrantFn)
+    // Password-protected pads: hide file metadata until the pad is unlocked
+    // for this request. canAccessPad still returns true for public-but-locked
+    // pads (so they show in the sidebar with hasPassword), but their file
+    // names/ids must not leak without a valid unlock token.
+    const unlockedPadIds = new Set(
+      accessiblePads
+        .filter((p) => !p.password || unlockTokens.some((t) => this.isValidUnlockToken(t, p.id)))
+        .map((p) => p.id)
     );
+    const accessibleFiles = files.filter((f) => {
+      // A file with no padId can't belong to a locked pad, so there's no token
+      // leak risk — gate only by access (legacy / orphan files stay visible).
+      if (f.padId == null) {
+        return canAccessFile(userId, f, this.store.findPadById.bind(this.store), hasGrantFn);
+      }
+      // Pad-scoped files: hide them unless the owning pad is unlocked, so a
+      // password-protected pad's file names/ids don't leak before unlock.
+      if (!unlockedPadIds.has(f.padId)) return false;
+      return canAccessFile(userId, f, this.store.findPadById.bind(this.store), hasGrantFn);
+    });
     return {
       pads: accessiblePads.map((p) => this.padMeta(p)),
       files: accessibleFiles,
@@ -131,23 +148,32 @@ class PadService {
   // Returns a result object so callers (ws/index.ts) can distinguish success
   // from failure and send an appropriate ack/nack to the sender. On failure,
   // `pad` carries the authoritative server state so the client can reset its
-  // shadow and avoid permanent divergence.
+  // shadow and avoid permanent divergence. Always returns a structured result
+  // (never null): missing pad / access denied / locked all use { ok:false, ... }.
   async applyPatch(
     userId: string | null,
     padId: number,
     patchText: string,
     excludeWsId: string | null,
     operationId: string | null = null,
-    baseVersion: number | null = null
+    baseVersion: number | null = null,
+    unlockToken: string | null = null
   ) {
     const pad = this.store.findPadById(padId);
     if (!pad) {
       logger.warn('applyPatch: pad not found', { padId });
-      return null;
+      return { ok: false, notFound: true, pad: null };
     }
     if (!this.canAccessPad(userId, pad)) {
       logger.warn('applyPatch: access denied', { padId, userId });
-      return null;
+      return { ok: false, denied: true, pad };
+    }
+    // Re-check the pad lock on every write. Connection-time auth is not enough:
+    // the unlock token may expire (8h TTL) or be revoked by a password change
+    // while this socket is still open.
+    if (pad.password && !this.isValidUnlockToken(unlockToken, padId)) {
+      logger.warn('applyPatch: pad locked / unlock token invalid', { padId, userId });
+      return { ok: false, locked: true, pad };
     }
 
     if (operationId) {
@@ -240,6 +266,7 @@ class PadService {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
     if (!this.canAccessPad(userId, pad)) throw ForbiddenError('Access denied');
+    // Pad lock is enforced by requirePadUnlock on the HTTP routes that call this.
 
     // Conditional update: the HTTP full-text fallback only overwrites when the
     // client's base version still matches the server's. A mismatch means

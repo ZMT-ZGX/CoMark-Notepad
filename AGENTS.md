@@ -72,7 +72,7 @@ docker compose up -d
 
 ```bash
 npm run typecheck                 # tsc --noEmit
-npm test                          # node --test (72 tests)
+npm test                          # node --test (74 tests)
 npm run lint                      # ESLint
 npm run format                    # Prettier
 npm run test:e2e                  # Playwright (requires build first)
@@ -102,10 +102,11 @@ npm run test:e2e                  # Playwright (requires build first)
 - **Session tokens**: HMAC-SHA256 in httpOnly cookies (`userId.timestamp.signature`), 30-day TTL
 - **CSRF**: Origin header validation with private IP bypass for LAN clients
 - **Pad access**: 3-tier — public (`ownerUserId=null`), private (owner+invited), legacy (admin-only)
-- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10)
-- **Patch sync**: `diff-match-patch` over WS; `state.lastSyncedText` as diff base; pad-scoped offline queue in localStorage
-- **File conversion**: in-worker with 512MB heap limit, 60s timeout, max 3 concurrent
-- **FTS5 search**: `pad_search` virtual table (trigram) + 3 triggers; `/api/search` endpoint with access filtering
+- **Pad unlock tokens**: bearer tokens for password-protected pads; **header only** (`X-Pad-Token`, comma-separated multi-token OK). Never put unlock tokens in query strings (access/proxy logs). Shared helpers: `extractPadTokens` / `hasValidUnlockToken` in `middlewares/security.ts`; client: `padAuthHeaders()` in `public/js/core.js`
+- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10); locked pads auth via first message `{ type: 'auth', padToken }`; every `applyPatch` re-validates `ws.unlockToken` (close **4403** if invalid)
+- **Patch sync**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; pad-scoped offline queue in localStorage
+- **File conversion**: in-worker with 512MB heap limit, 60s timeout, max 3 concurrent; default **100MB** (`CONVERT_MAX_BYTES`)
+- **FTS5 search**: `pad_search` virtual table (trigram) + 3 triggers; `/api/search` with access filtering + unlock gating; snippet delimiters are private-use `U+E000`/`U+E001` (client escapes then restores `<mark>`) — never raw HTML from FTS
 - **WAL + busy_timeout=5000**: SQLite concurrency hardening
 - **DB migration**: SQLite-first; legacy `store.json` auto-imported with backup
 
@@ -118,6 +119,8 @@ npm run test:e2e                  # Playwright (requires build first)
 - Do NOT load diff-match-patch from a CDN — use `public/vendor/diff_match_patch.js`
 - Do NOT silently swallow patch failures — log with `logger.warn` and either reject or fall back
 - Do NOT skip access checks on new endpoints — always run through `canAccessPad()`
+- Do NOT accept pad unlock tokens from query strings (`?padToken=`) — header only
+- Do NOT render FTS snippets as HTML without escaping; do NOT reintroduce literal `<mark>` delimiters from SQLite `snippet()`
 - Do NOT add offline queue entries with a global key — namespace by `padId`
 - Do NOT modify `state` object outside `public/js/core.js` modules
 - Do NOT commit secrets, `.env` files, or API keys
@@ -130,14 +133,16 @@ See `.env.example`. Key vars:
 - `ADMIN_TOKEN` — global pad management
 - `DATA_DIR` — data directory path (default: `./data`)
 - `PORT` — server port (default: 8000)
+- `CONVERT_MAX_BYTES` — max file size for Markdown conversion (default: 100MB)
+- `CONVERT_TIMEOUT_MS` — conversion timeout (default: 60000)
 
 ## Definition of Done
 
 A change is complete when:
 1. All code changes are saved to files
 2. `npm run typecheck` passes (0 errors)
-3. `npm test` passes with exit code 0 (72/72)
+3. `npm test` passes with exit code 0 (74/74)
 4. `npm run lint` passes with no new warnings
-5. If security-related: verify CSRF, auth, and CSP behavior
+5. If security-related: verify CSRF, auth, CSP, and unlock-token header-only behavior
 6. If frontend: verify in browser at relevant breakpoints (desktop + mobile)
 7. If public API: document in README.md and CHANGELOG.md

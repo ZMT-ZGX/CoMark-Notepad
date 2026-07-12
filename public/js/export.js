@@ -4,9 +4,13 @@
  * Handles Markdown file download and beforeunload flush.
  */
 
-import { state, $, getPadToken, showToast } from './core.js';
+import { state, $, getPadToken, padAuthHeaders, showToast } from './core.js';
 
 const textarea = () => $('#text-input');
+
+// Chrome caps both sendBeacon and fetch(keepalive) bodies around 64KB.
+// Leave headroom under that; larger pads already sync via WS / offline queue.
+const UNLOAD_BODY_MAX = 60_000;
 
 export function initExport() {
   $('#export-btn').addEventListener('click', () => {
@@ -25,16 +29,34 @@ export function initExport() {
 
 export function initBeforeUnload() {
   window.addEventListener('beforeunload', () => {
-    if (state.sendTimeout) {
-      clearTimeout(state.sendTimeout);
-      state.sendTimeout = null;
-      const token = getPadToken(state.currentPadId);
-      const payload = JSON.stringify({ text: textarea().value, _wsId: state.wsId });
-      const blob = new Blob([payload], { type: 'application/json' });
-      const url = token
-        ? `/api/pads/${state.currentPadId}/text?padToken=${encodeURIComponent(token)}`
-        : `/api/pads/${state.currentPadId}/text`;
-      navigator.sendBeacon(url, blob);
+    if (!state.sendTimeout) return;
+    clearTimeout(state.sendTimeout);
+    state.sendTimeout = null;
+
+    // Narrow window only: debounce still pending when the tab closes.
+    // Main sync is WS; this is a best-effort tail flush.
+    const padId = state.currentPadId;
+    const payload = JSON.stringify({ text: textarea().value, _wsId: state.wsId });
+    const bodyBlob = new Blob([payload], { type: 'application/json' });
+    if (bodyBlob.size > UNLOAD_BODY_MAX) return;
+
+    const token = getPadToken(padId);
+    try {
+      if (token) {
+        // Locked pad: must send X-Pad-Token. sendBeacon cannot set headers,
+        // and ?padToken= would land in access / proxy logs — use keepalive fetch.
+        fetch(`/api/pads/${padId}/text`, {
+          method: 'POST',
+          headers: padAuthHeaders(padId, { 'Content-Type': 'application/json' }),
+          body: payload,
+          keepalive: true,
+        });
+      } else {
+        // Unlocked pad: no auth header needed; sendBeacon is fine.
+        navigator.sendBeacon(`/api/pads/${padId}/text`, bodyBlob);
+      }
+    } catch {
+      /* page is unloading — best effort */
     }
   });
 }

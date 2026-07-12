@@ -1,7 +1,7 @@
 'use strict';
 
 const rateLimit = require('express-rate-limit');
-const { checkOrigin } = require('../middlewares/security');
+const { checkOrigin, extractPadTokens } = require('../middlewares/security');
 
 const createAuthRouter = require('./auth');
 const createPadsRouter = require('./pads');
@@ -31,7 +31,8 @@ function mountRoutes(
   // Global state endpoint (mounted at /api, not /api/pads)
   app.get('/api/state', async (req: any, res: any, next: any) => {
     try {
-      const state = await padService.getState(req.userId);
+      // Unlock tokens (header only) gate file metadata of password-protected pads.
+      const state = await padService.getState(req.userId, extractPadTokens(req));
       res.json(state);
     } catch (e) {
       if (res.headersSent) return;

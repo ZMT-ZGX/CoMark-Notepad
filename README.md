@@ -10,11 +10,11 @@
 - **Patch 协同算法** — 基于 `diff-match-patch`，多设备同时编辑不丢内容（告别全量覆盖）
 - **离线队列** — 断网时编辑进 localStorage（按 pad 隔离），重连后按序自动 flush
 - **WS 心跳保活** — 30 秒 ping/pong + 强杀幽灵连接，内存不会泄漏
-- **SQLite 全文搜索** — FTS5（trigram 分词）毫秒级搜索，匹配高亮片段
-- **文件共享** — 拖拽 / 粘贴（⌘/Ctrl+V 上传剪贴板文件或截图）/ 点击上传（Busboy 流式，100MB 上限），支持中文文件名
-- **文件转 Markdown** — PDF / DOCX / XLSX / PPTX / HTML / CSV / TXT / JSON / XML / YAML 及 JPG / PNG / GIF 一键转换
+- **SQLite 全文搜索** — FTS5（trigram 分词）毫秒级搜索；高亮用私有区定界符防 XSS；加锁 Pad 需 unlock token 才出现在结果中
+- **文件共享** — 拖拽 / 粘贴（⌘/Ctrl+V 上传剪贴板文件或截图）/ 点击上传（Busboy 流式，**100MB** 上限），支持中文文件名
+- **文件转 Markdown** — PDF / DOCX / XLSX / PPTX / HTML / CSV / TXT / JSON / XML / YAML 及 JPG / PNG / GIF 一键转换（默认 **100MB** 上限，与上传对齐）
 - **邀请制访问控制** — 三级权限（公开 / 受邀 / 管理员），HMAC Cookie 认证
-- **密码保护** — 单个 Pad 可独立设密，WS 解锁 token 不走 URL
+- **密码保护** — 单个 Pad 可独立设密；unlock token 只走 `X-Pad-Token` header / WS 首包 auth（不进 URL / access log）
 - **深色 / 浅色主题** — 跟随系统 / 手动切换，Apple 设计风格
 - **移动端适配** — iOS Safari 兼容，左右滑切 Pad，AlloyFinger 手势
 - **二维码快速连接** — 手机扫码即可加入
@@ -97,7 +97,7 @@ docker compose logs -f
 | `NODE_ENV` | `development` | 设为 `production` 启用严格模式 |
 | `DATA_DIR` | `./data` | 数据目录 |
 | `FILE_TTL_HOURS` | `72` | 文件自动过期时间 |
-| `CONVERT_MAX_BYTES` | `10485760` | 转 Markdown 的文件大小上限（10MB）|
+| `CONVERT_MAX_BYTES` | `104857600` | 转 Markdown 的文件大小上限（100MB）|
 | `CONVERT_TIMEOUT_MS` | `60000` | 转换超时（ms）|
 
 ## 协同模型
@@ -154,39 +154,46 @@ docker compose logs -f
 - `DELETE /api/invitations/:token` — 删除令牌
 
 ### Pad
-- `GET  /api/state` — 获取可访问的 Pads + 文件
-- `GET  /api/search?q=<terms>` — FTS5 全文搜索（按用户可见范围过滤）
+- `GET  /api/state` — 获取可访问的 Pads + 文件（加锁 Pad 的文件列表需 `X-Pad-Token`）
+- `GET  /api/search?q=<terms>` — FTS5 全文搜索（按用户可见范围过滤；加锁 Pad 需 `X-Pad-Token`，支持逗号分隔多 token）
 - `POST /api/pads` — 创建 Pad
-- `PUT  /api/pads/:id/text` — 全量更新文本（HTTP 兜底）
+- `PUT  /api/pads/:id/text` — 全量更新文本（HTTP 兜底；加锁需 header）
+- `POST /api/pads/:id/text` — 同上，供 `sendBeacon` / unload 兜底
 - `DELETE /api/pads/:id` — 删除 Pad
-- `PUT  /api/pads/:id/password` — 设置密码
+- `POST /api/pads/:id/password` — 设置 / 修改 / 清除密码
+- `POST /api/pads/:id/unlock` — 校验密码，返回 unlock token
 
 ### 文件
-- `POST   /api/upload` — multipart 上传
-- `GET    /api/files/:id` — 下载
+- `POST   /api/upload` — multipart 上传（加锁 Pad 需 `X-Pad-Token` header，不接受 query）
+- `GET    /api/files/:id` — 下载（加锁需 `X-Pad-Token` header）
 - `DELETE /api/files/:id` — 删除
-- `GET    /api/convert/capabilities` — 获取可转换格式
-- `POST   /api/convert/:fileId` — 将已上传文件转为 Markdown
+- `GET    /api/convert/capabilities` — 获取可转换格式与 `maxBytes`（默认 100MB）
+- `POST   /api/convert/:fileId` — 将已上传文件转为 Markdown（默认 ≤100MB）
+
+> **Unlock token**：所有需要解锁的 HTTP 路径只认请求头 `X-Pad-Token`（可逗号分隔多个）。**不要**使用 `?padToken=`——会进 access / proxy 日志。
 
 ### WebSocket
 连接：`ws://host:port/?pad=<padId>`（session token 通过 Cookie 自动携带；锁定的 pad 需要连接后第一时间发 `{ type: 'auth', padToken }` 消息）
 
 **客户端 → 服务端**
-- `{ type: 'patch', padId, data }` — 发送 diff patch
+- `{ type: 'auth', padToken }` — 加锁 Pad 建连后首包鉴权
+- `{ type: 'patch', padId, data, seq?, operationId?, baseVersion? }` — 发送 diff patch（服务端每次写会复检 unlock token）
 
 **服务端 → 客户端**
-- `{ type: 'hello', wsId, padId, userId }` — 连接建立
+- `{ type: 'hello', wsId, padId, userId }` — 连接建立（含 unlock 鉴权成功）
 - `{ type: 'patch', padId, data, textVersion, senderId }` — 远端 patch 广播
-- `{ type: 'patch-ack', textVersion }` — 单个 patch 已成功应用
-- `{ type: 'text-update', padId, text, textVersion }` — 全量文本（仅 HTTP 兜底时出现）
+- `{ type: 'patch-ack', textVersion, text, seq }` — 单个 patch 已成功应用
+- `{ type: 'patch-nack', padId, text, textVersion }` — 应用失败，回传权威正文（仅发送者）
+- `{ type: 'text-update', padId, text, textVersion }` — 全量文本快照
 - `{ type: 'online-count', padId, count }` — 在线人数
 - `{ type: 'file-added' | 'file-deleted', padId, ... }` — 文件事件
 - `{ type: 'pad-created' | 'pad-updated' | 'pad-deleted', ... }` — Pad 事件
+- 关闭码 **4403** — Pad 锁定 / unlock token 失效；**4001** — patch 速率超限
 
 ## 测试
 
 ```bash
-npm test                  # 全部测试（72 个）
+npm test                  # 全部测试（74 个）
 npm run typecheck         # TypeScript 严格检查
 npm run lint              # ESLint
 npm run test:e2e          # Playwright E2E（需先 npm run build）
@@ -256,9 +263,9 @@ collab-notepad/
 **Patch 协同 + 全文搜索 + 离线队列**
 
 - **Patch 协同算法** — 引入 `diff-match-patch`，前端用 `lastSyncedText` 维护基准，WS 只发 patch；服务端 `padService.applyPatch` 应用后广播 patch；接收方用 `patch_apply` 合并，光标位置尽力保留
-- **离线队列** — `localStorage` 按 pad 隔离（`patch-queue:${padId}`），断网编辑暂存；`onopen` 时按序 flush；`beforeunload` 捕捉最后一次未同步编辑
-- **WS 心跳保活** — 已有 30s ping/pong 机制；客户端重连时先发 `{ type: 'auth', padToken }`（不再走 URL，避免日志泄露）
-- **SQLite FTS5 全文搜索** — `pad_search` 虚拟表（trigram 分词）+ AI/AD/AU 触发器自动同步；`/api/search?q=...` 端点按 bm25 排序；用户访问范围过滤；`snippet()` 返回 `<mark>` 高亮片段
+- **离线队列** — `localStorage` 按 pad 隔离（`patch-queue:${padId}`），断网编辑暂存；认证完成的 `hello` 后按序 flush；`beforeunload` 捕捉未同步尾巴（有 token 用 keepalive fetch，无 token 用 sendBeacon）
+- **WS 心跳保活** — 已有 30s ping/pong 机制；客户端重连时先发 `{ type: 'auth', padToken }`（不再走 URL，避免日志泄露）；写路径每次复检 unlock token
+- **SQLite FTS5 全文搜索** — `pad_search` 虚拟表（trigram 分词）+ AI/AD/AU 触发器自动同步；`/api/search?q=...` 按 bm25 排序；访问范围 + 加锁门禁；snippet 用 `U+E000/E001` 定界防 XSS
 - **WAL + busy_timeout=5000** — 消除 99% SQLITE_BUSY 报错
 - **离线横幅 UI** — `<div id="offline-banner">` 黄色固定顶栏
 - **Markdown TOC** — preview 渲染后提取 h1-h3 生成悬浮目录，点击平滑滚动
@@ -291,6 +298,14 @@ collab-notepad/
 - 公开 Pad 上任意已登录用户可删除 / 清空文件，忽略 owner；匿名删除仍被拒；私人 Pad 权限不变
 - 背景与多人部署的安全权衡见上方「访问控制模型」¹ 注释
 - 其他修复：**上传大文件永久卡死**（`req.destroyed` 误判中断，改用 `!req.complete`）、**PDF 转 Markdown 全部失败**（pdf-parse v2 `PDFParse` 类迁移）、IPv6 私网识别补全、`SESSION_SECRET` 开发期持久化（`0600`）、`isPublicPad` 去重、粘贴上传文件/截图、hotkeys-js 容错、限流范围收窄、CSP 重新允许 cdn.jsdelivr.net（SRI）
+
+### Unreleased（安全加固）
+
+- **搜索 XSS** — FTS snippet 改用 `U+E000/E001` 定界，客户端 escape 后再还原 `<mark>`
+- **Unlock token 仅 header** — 下载/上传/搜索/state/改密不再接受 `?padToken=`；多 token 逗号分隔
+- **加锁门禁** — 搜索与 state 文件列表对未解锁 Pad 隐藏内容；解锁后自动 `refreshPads`
+- **WS 写复检锁** — 每次 patch 校验 `ws.unlockToken`，失效 `4403`
+- **转换上限 100MB** — `CONVERT_MAX_BYTES` 默认与上传对齐
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 

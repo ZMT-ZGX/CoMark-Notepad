@@ -1,5 +1,5 @@
 import {
-  state, $, showToast, escapeHtml, getPadToken, upsertLocalFile, removeLocalFile,
+  state, $, showToast, escapeHtml, getPadToken, padAuthHeaders, upsertLocalFile, removeLocalFile,
   formatSize, timeAgo, fileIcon, isConvertible, canConvert, MAX_FILE_SIZE,
 } from './core.js';
 import { deleteFileApi, convertFileApi, uploadWithProgress } from './server.js';
@@ -50,13 +50,26 @@ function createFileElement(file) {
     </div>
   `;
 
-  el.querySelector('.download').addEventListener('click', () => {
-    const a = document.createElement('a');
-    const padToken = getPadToken(file.padId || state.currentPadId);
-    const url = padToken ? `/api/files/${file.id}?padToken=${encodeURIComponent(padToken)}` : `/api/files/${file.id}`;
-    a.href = url;
-    a.download = file.originalName;
-    a.click();
+  el.querySelector('.download').addEventListener('click', async () => {
+    // Fetch with header so the unlock token never appears in the URL / logs.
+    try {
+      const res = await fetch(`/api/files/${file.id}`, {
+        headers: padAuthHeaders(file.padId || state.currentPadId),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.originalName;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      showToast(e.message || 'Download failed');
+    }
   });
 
   const previewName = el.querySelector('.file-name.is-previewable');

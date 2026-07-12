@@ -3,7 +3,7 @@
 import type { CoMarkWebSocket } from '../types';
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { checkOrigin, requirePadUnlock } = require('../middlewares/security');
+const { checkOrigin, requirePadUnlock, extractPadTokens } = require('../middlewares/security');
 const { isAdmin } = require('../middlewares/auth');
 const { BadRequestError } = require('../utils/errors');
 const { validate } = require('../middlewares/validate');
@@ -125,7 +125,10 @@ function createRouter(
       try {
         const padId = Number(req.params.id);
         if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
-        const unlockToken = req.headers['x-pad-token'];
+        // Match any of the comma-separated unlock tokens for THIS pad.
+        const tokens = extractPadTokens(req);
+        const unlockToken =
+          tokens.find((t: string) => padService.isValidUnlockToken(t, padId)) || tokens[0] || null;
         const { password, currentPassword, _wsId } = req.body;
         const result = await padService.setPassword(
           req.userId,

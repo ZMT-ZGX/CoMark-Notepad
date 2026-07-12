@@ -5,7 +5,7 @@
  * plus a floating TOC (h1–h3) that scrolls the preview body smoothly.
  */
 
-import { state, $, getPadToken, escapeHtml } from './core.js';
+import { state, $, padAuthHeaders, escapeHtml } from './core.js';
 
 export async function openMarkdownPreview(file) {
   const modal = $('#preview-modal');
@@ -20,11 +20,10 @@ export async function openMarkdownPreview(file) {
   modal.hidden = false;
 
   try {
-    const padToken = getPadToken(file.padId || state.currentPadId);
-    const url = padToken
-      ? `/api/files/${file.id}?padToken=${encodeURIComponent(padToken)}`
-      : `/api/files/${file.id}`;
-    const res = await fetch(url);
+    // Header only — never put padToken in the URL (access / proxy logs).
+    const res = await fetch(`/api/files/${file.id}`, {
+      headers: padAuthHeaders(file.padId || state.currentPadId),
+    });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `HTTP ${res.status}`);

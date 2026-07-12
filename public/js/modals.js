@@ -110,6 +110,9 @@ export function initUnlockModal() {
       if (data.token) setPadToken(unlockTargetPadId, data.token);
       hideUnlockModal();
       state.currentPadId = unlockTargetPadId;
+      // Re-fetch state with the new unlock token so gated file metadata for
+      // this pad becomes visible without a full page reload.
+      await refreshPads();
       await loadPadContent();
       connectWS();
       renderPadTabs();

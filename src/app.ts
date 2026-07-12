@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { JSON_BODY_LIMIT } = require('./config');
 const { authenticate } = require('./middlewares/auth');
+const { extractPadTokens, hasValidUnlockToken } = require('./middlewares/security');
 const errorHandler = require('./middlewares/errorHandler');
 const { mountRoutes } = require('./routes');
 const logger = require('./utils/logger');
@@ -108,6 +109,7 @@ function createApp(
         .join(' AND ');
       const db = services.db;
       const { padService } = services;
+      const unlockTokens = extractPadTokens(req);
       const rows = db.searchPads(tokens);
       // Use full pad from DB so invitation-grant check in canAccessPad works correctly.
       const results = rows
@@ -118,8 +120,9 @@ function createApp(
           // unless the requester has unlocked THIS pad for THIS request. A
           // public pad with a password is still "accessible" (canAccessPad
           // returns true for public pads) but its content stays gated.
-          const padToken = req.query.padToken || req.headers['x-pad-token'];
-          if (pad.password && !padService.isValidUnlockToken(padToken, pad.id)) return null;
+          // Header only — a query param would land in access logs / proxy logs.
+          // Multiple tokens may be comma-separated (one per unlocked pad).
+          if (pad.password && !hasValidUnlockToken(padService, unlockTokens, pad.id)) return null;
           return {
             id: r.id,
             content: r.content,
