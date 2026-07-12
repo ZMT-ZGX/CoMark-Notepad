@@ -2,6 +2,67 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] - 2026-07-12
+
+### Security Hardening（Pad unlock / 搜索 / 转换）
+
+基于代码审查的安全加固与行为对齐：
+
+1. **搜索片段 XSS 修复（Critical）** — FTS5 `snippet()` 不再用字面量 `<mark>` 包裹用户正文（用户可写入 `</mark>…` 绕过 escape-then-restore）。服务端改用私有区定界符 `U+E000` / `U+E001`；客户端先 `escapeHtml` 全文，再只把定界符还原为 `<mark>`。
+2. **Unlock token 全面禁止 query 串** — `requirePadUnlock`、文件下载/上传、搜索、`/api/state` 只认 `X-Pad-Token` header。客户端下载/预览改为 `fetch + header + blob URL`；`beforeunload` 兜底写入改用 `fetch({ keepalive: true })` 带 `X-Pad-Token` 头（`sendBeacon` 无法带请求头，故弃用），body 超 60KB 时跳过，由按 pad 隔离的离线队列兜底（写 localStorage，重连补发）。
+3. **多 token header** — `X-Pad-Token` 支持逗号分隔多个 unlock token；`extractPadTokens` / `hasValidUnlockToken` 在 search、state、download、upload、改密路径共用。
+4. **搜索 + state 门禁** — 加锁 Pad 的正文/snippet 不出现在搜索结果中，除非请求携带该 Pad 的有效 unlock token；`/api/state` 同样隐藏加锁 Pad 的文件元数据。客户端搜索/state 自动附带全部已存 token；解锁成功后 `refreshPads()` 立即刷新文件列表。
+5. **WS 写路径复检锁** — 建连时把 unlock token 存到 `ws.unlockToken`；每次 `applyPatch` 再校验，失效返回 `{ locked: true }` 并由服务端 `close(4403, 'Pad locked')`。`applyPatch` 统一返回结构体（`ok` / `notFound` / `denied` / `locked`），不再混用 `null`。
+6. **`padId` 误归属收紧** — 服务层去掉 `file.padId ?? 1` 的强制默认，避免挂到错误 Pad；无 `padId` 的遗留/孤儿文件改回仅按 `canAccessFile` 鉴权显示（既不泄漏加锁 Pad 元数据，也不再误隐藏可访问文件）。加锁 Pad 的文件元数据在未携带有效 unlock token 前仍对 `/api/state` 不可见。
+7. **`CONVERT_MAX_BYTES` 默认 100MB** — 与上传上限对齐（原 10MB）；客户端 `convertCapabilities.maxBytes` 与 README 同步。可用环境变量覆盖。
+
+### Test Coverage
+
+- 74/74 单元测试通过；`tsc --noEmit` 零错误
+
+---
+
+## [1.1.2] - 2026-07-08
+
+### 公开 Pad 文件删除权限放宽（有意为之）
+
+公开 Pad（`ownerUserId` 与 `creatorCode` 均为空）上，**任意已登录用户均可删除 / 清空文件，忽略 owner 匹配**；匿名删除仍被拒绝（单文件 401、批量 403）；私人 Pad 权限不变。
+
+- **背景**：身份由浏览器自动注册，每次服务重启使旧会话失效并产生新身份，旧身份上传的文件因 owner 不匹配而无法被新身份删除。放宽后单人本地场景可正常管理自己的全部文件。
+- **安全权衡**：该放宽对「共享 / 多人部署」会削弱文件访问控制（任意登录用户可删他人文件）。当前版本默认保留此行为以保障单人本地体验；严格模式请在共享前通过设置 `ADMIN_TOKEN` 并评估（详见 README「访问控制模型」）。
+- 同步更新 `tests/identity.test.js` 断言：公开 Pad 上普通登录用户删 / 清空文件现预期为 200。
+
+### 其他修复与改进
+
+- **上传大文件永久卡死修复（严重）** — 几百 KB 以上的文件上传会永远停在「Uploading…」，服务端收完 body 却从不返回。根因：中断检测用 `req.on('close')` + `req.destroyed`，而 `req.destroyed` 在请求正常结束时也会变 `true`；较大的 multipart body 使 `close` 早于 busboy 的 `finish` 触发，被误判为中断 → 销毁正在写入的文件流 → busboy `finish` 里 `await fileWritePromise` 永不 settle → 请求悬挂。改用 `req.on('close')` + `!req.complete`（`req.complete` 为 `true` 表示 body 已完整接收，属正常结束）。已验证 800KB / 2.8MB PDF 上传返回 200 并完整落盘，真正的中途中断仍正确清理半成品；同时规避了已弃用的 `req.on('aborted')`。
+- **pdf-parse v2 迁移（严重）** — 升级到 pdf-parse v2.4.5 后 **所有 PDF → Markdown 转换失败（HTTP 422）**：v2 移除了默认导出函数，改为 `PDFParse` 类。`convert-worker.js` 改用 `new PDFParse({ data })` → `getText()`，并在 `finally` 中 `destroy()` 释放资源。
+- **IPv6 私网识别补全** — `security.ts` 的 `isPrivateIp` 在剥离 `::ffff:` 前缀前先去除 IPv6 方括号（`[::1]` / `[fd00::1]`），修复方括号形式 IPv6 主机被误判为公网导致 CSRF 403 / WS 4400。
+- **`SESSION_SECRET` 开发期持久化** — 未显式设置时持久化到 `DATA_DIR/.session_secret`（已被 `.gitignore` 忽略，权限 `0600`），使会话在重启后有效；生产环境仍强制要求显式设置。
+- **代码去重** — 提取 `isPublicPad(pad)` 辅助函数，`deleteFile` / `clearFiles` 复用；`clearFiles` 权限判断合并为单一 `canClear` 守卫。
+- **粘贴上传文件** — `files.js` 新增全页 `paste` 监听：⌘/Ctrl+V 可上传剪贴板中的文件（访达/资源管理器复制的文件）或截图（自动命名 `pasted-<时间戳>[-N].<ext>`），复用拖拽的确认流程；剪贴板仅含文本、或焦点在正文且仅为图片时不拦截（后者仍由 `text-sync.js` 内嵌为 base64）。`index.html` 空状态提示同步为「Drag, paste, or click Upload」。
+- **hotkeys-js 容错** — `shortcuts.js` 在 `hotkeys` 全局缺失时静默跳过，不再中断整条初始化链。
+- **限流范围收窄** — 单文件删除移出专用删除限流（仅受通用限流保护），批量清空保留独立 `clearFilesLimiter`（max 5）。
+- **CSP 调整** — `app.ts` `scriptSrc` 重新允许 `https://cdn.jsdelivr.net`（alloyfinger 经 CDN 加载且已配 SRI `integrity`）。
+- **匿名删除统一 401** — `routes/files.ts` 对任意文件的匿名删除返回 401（原仅对无主文件）。
+
+### 可靠投递状态机重构（每 Pad 隔离、单 in-flight）
+
+将前端的协同同步模型从「全局 shadow + 多个并行未 ACK patch」改为 **每 Pad 一个 confirmed shadow + 一个 in-flight operation + 一个 pending target text**（`state.padSync[padId]`），彻底消除在全局数组与并行 patch 上反复补状态的脆弱性。修复 6 个可靠投递问题：
+
+- **P1 并行 patch 串文** — `text-sync.js` 仅在 ACK 后才推进 shadow 并计算下一条；同一 shadow 上只允许一个 in-flight，避免 `""→"A"` 与 `""→"AB"` 并发时被服务端依次应用成 `AAB`。
+- **P1 上锁 Pad 认证失败丢队列** — 离线入队不再提前推进 shadow；队列改为在认证完成的 `hello` 之后才 flush，invalid unlock token 时队列完整保留。
+- **P1 切换 Pad 串号** — `switchPad` 在切换前先把旧 Pad 的 in-flight / 待发送文本折叠回其离线队列；每个 WS 实例记录所属 `padId`，断线重排只处理自己的 Pad，旧 socket 的 `onclose` 因实例检查直接返回，不会把旧 patch 串入新 Pad。
+- **P1 旧 Pad HTTP 响应写新 Pad** — `requestToken` 改为每 Pad 单调递增、永不复位；409 合并路径捕获并贯穿原始 `padId` + `sync`，陈旧响应（来自旧 Pad）直接丢弃。
+- **P2 旧 GET 覆盖新 WS** — `applyTextState` 增加版本守卫，版本低于当前确认的 GET 不再覆盖正文（防止 WS v11 先到、GET v10 后到导致持有 v10 却标记 v11）。
+- **P2 图片 2MB 上限与 100k 字符服务端限制冲突** — 粘贴内嵌前按 base64 长度（>75KB）提前拦截并提示，新增 E2E 覆盖该边界（~60KB PNG 被拒、正文不变）。
+
+### Test Coverage
+
+- 74/74 单元测试 + 17 E2E 全部通过
+- typecheck + lint 零错误
+
+---
+
 ## [1.1.1] - 2026-07-07
 
 ### Code Review Hardening (10 项)

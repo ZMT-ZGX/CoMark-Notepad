@@ -346,6 +346,47 @@ test('pad password protection', async () => {
   }
 });
 
+test('locked pad content is not exposed through search without an unlock token', async () => {
+  const server = await startServer({ ADMIN_TOKEN: 'admin123' });
+  try {
+    // Admin sets a password on the public pad 1 and receives an unlock token.
+    const setPassword = await fetchJson(server.baseUrl, '/api/pads/1/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': 'admin123', Origin: server.baseUrl },
+      body: JSON.stringify({ password: 'secret123' }),
+    });
+    assert.equal(setPassword.response.status, 200);
+    const token = setPassword.body.token;
+
+    // Seed unique, searchable content (the PUT also needs the unlock token).
+    const unique = 'comarklockedsearchterm';
+    const putRes = await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Pad-Token': token, Origin: server.baseUrl },
+      body: JSON.stringify({ text: `secret note ${unique}` }),
+    });
+    assert.equal(putRes.response.status, 200);
+
+    // Search WITHOUT an unlock token must not leak the locked pad's content.
+    const lockedSearch = await fetchJson(server.baseUrl, `/api/search?q=${unique}`, {
+      headers: { Origin: server.baseUrl },
+    });
+    assert.equal(lockedSearch.response.status, 200);
+    const leaked = (lockedSearch.body.results || []).some((r) => String(r.content).includes(unique));
+    assert.equal(leaked, false, 'locked pad content must not appear in search without unlock token');
+
+    // Search WITH a valid unlock token should return the content.
+    const unlockedSearch = await fetchJson(server.baseUrl, `/api/search?q=${unique}`, {
+      headers: { 'X-Pad-Token': token, Origin: server.baseUrl },
+    });
+    assert.equal(unlockedSearch.response.status, 200);
+    const found = (unlockedSearch.body.results || []).some((r) => String(r.content).includes(unique));
+    assert.equal(found, true, 'locked pad content should appear in search when unlocked');
+  } finally {
+    await stopServer(server);
+  }
+});
+
 test('file updates broadcast to same pad only', async () => {
   const server = await startServer();
   try {
@@ -962,6 +1003,33 @@ test('concurrent patches at same position both succeed', async () => {
 
     await closeClient(a);
     await closeClient(b);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('patch-ack echoes the client-provided seq for reliable delivery', async () => {
+  const server = await startServer();
+  try {
+    const a = await createReadyClient(server.wsUrl, 1);
+    a.drain();
+
+    // The client stamps each outgoing patch with a monotonic seq. The server
+    // must echo it back in patch-ack so the client can match the ACK to the
+    // exact in-flight patch and advance its confirmed shadow (and, on a drop
+    // before ACK, re-queue only the unconfirmed edits). Without the echo the
+    // client can't distinguish which patch was confirmed.
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('', 'seq tracked edit'), seq: 7 }));
+
+    const ack = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
+    assert.equal(ack.seq, 7, 'patch-ack must echo the seq the client sent');
+    assert.ok(ack.textVersion > 0, 'patch-ack should carry a positive textVersion');
+
+    // Server text should reflect the applied patch.
+    const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
+    assert.equal(pad.text, 'seq tracked edit');
+
+    await closeClient(a);
   } finally {
     await stopServer(server);
   }

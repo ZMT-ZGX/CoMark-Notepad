@@ -141,7 +141,11 @@ class ConvertService {
         fs.unlinkSync(filepath);
       } catch {}
 
-      this.broadcast.toPad(file.padId, { type: 'file-deleted', padId: file.padId, fileId: file.id });
+      this.broadcast.toPad(file.padId, {
+        type: 'file-deleted',
+        padId: file.padId,
+        fileId: file.id,
+      });
       this.broadcast.toPad(mdFile.padId, { type: 'file-added', padId: mdFile.padId, file: mdFile });
 
       return mdFile;
@@ -151,7 +155,12 @@ class ConvertService {
     }
   }
 
-  _convertInWorker(buffer: Buffer, ext: string, mimeType: string, originalName: string): Promise<string> {
+  _convertInWorker(
+    buffer: Buffer,
+    ext: string,
+    mimeType: string,
+    originalName: string
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const worker = new Worker(path.join(__dirname, '../../convert-worker.js'), {
         workerData: { buffer, ext, mimeType, originalName },

@@ -6,11 +6,16 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { JSON_BODY_LIMIT } = require('./config');
 const { authenticate } = require('./middlewares/auth');
+const { extractPadTokens, hasValidUnlockToken } = require('./middlewares/security');
 const errorHandler = require('./middlewares/errorHandler');
 const { mountRoutes } = require('./routes');
 const logger = require('./utils/logger');
 
-function createApp(services: any, getServerPort: (() => number) | null, getPadClients: (padId: number) => Set<any> | undefined) {
+function createApp(
+  services: any,
+  getServerPort: (() => number) | null,
+  getPadClients: (padId: number) => Set<any> | undefined
+) {
   const app = express();
   app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 0));
   app.disable('x-powered-by');
@@ -22,7 +27,7 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
         directives: {
           defaultSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
-          scriptSrc: ["'self'"],
+          scriptSrc: ["'self'", 'https://cdn.jsdelivr.net'],
           imgSrc: ["'self'", 'data:', 'blob:'],
           connectSrc: ["'self'", 'ws:', 'wss:'],
           baseUri: ["'self'"],
@@ -56,7 +61,10 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
   });
   app.use('/api/', generalLimiter);
 
-  // Delete limiters (only count DELETE requests)
+  // Delete limiter — guards the destructive "delete whole pad" action.
+  // Single-file deletes (DELETE /api/files/:id) are routine user operations
+  // and are instead covered by the general limiter below; the bulk "clear all
+  // files" action already has its own clearFilesLimiter (max 5).
   const deleteLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
@@ -66,7 +74,6 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
     message: { error: 'Too many delete requests.' },
   });
   app.use('/api/pads/', deleteLimiter);
-  app.use('/api/files/', deleteLimiter);
 
   // Body parser
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
@@ -89,19 +96,33 @@ function createApp(services: any, getServerPort: (() => number) | null, getPadCl
   // Full-text search (FTS5) — scoped to pads the current user can access
   app.get('/api/search', (req: any, res: any, next: any) => {
     try {
-      const raw = String(req.query.q || '').trim().slice(0, 200);
+      const raw = String(req.query.q || '')
+        .trim()
+        .slice(0, 200);
       if (!raw) return res.json({ results: [] });
       // Build MATCH query: wrap each token in quotes for phrase search,
       // AND them together so multi-term narrows results.
-      const tokens = raw.split(/\s+/).filter(Boolean).map((t) => `"${t.replace(/"/g, '""')}"`).join(' AND ');
+      const tokens = raw
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((t) => `"${t.replace(/"/g, '""')}"`)
+        .join(' AND ');
       const db = services.db;
       const { padService } = services;
+      const unlockTokens = extractPadTokens(req);
       const rows = db.searchPads(tokens);
       // Use full pad from DB so invitation-grant check in canAccessPad works correctly.
       const results = rows
         .map((r: any) => {
           const pad = db.pads.findById(r.id);
           if (!pad || !padService.canAccessPad(req.userId, pad)) return null;
+          // Password-protected pads: their body must not leak through search
+          // unless the requester has unlocked THIS pad for THIS request. A
+          // public pad with a password is still "accessible" (canAccessPad
+          // returns true for public pads) but its content stays gated.
+          // Header only — a query param would land in access logs / proxy logs.
+          // Multiple tokens may be comma-separated (one per unlocked pad).
+          if (pad.password && !hasValidUnlockToken(padService, unlockTokens, pad.id)) return null;
           return {
             id: r.id,
             content: r.content,

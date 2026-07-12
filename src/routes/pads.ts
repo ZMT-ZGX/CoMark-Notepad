@@ -3,7 +3,7 @@
 import type { CoMarkWebSocket } from '../types';
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { checkOrigin, requirePadUnlock } = require('../middlewares/security');
+const { checkOrigin, requirePadUnlock, extractPadTokens } = require('../middlewares/security');
 const { isAdmin } = require('../middlewares/auth');
 const { BadRequestError } = require('../utils/errors');
 const { validate } = require('../middlewares/validate');
@@ -34,7 +34,10 @@ const publicPadCreateLimiter = rateLimit({
   message: { error: 'Too many public pad creations.' },
 });
 
-function createRouter(padService: any, getPadClients: (padId: number) => Set<CoMarkWebSocket> | undefined) {
+function createRouter(
+  padService: any,
+  getPadClients: (padId: number) => Set<CoMarkWebSocket> | undefined
+) {
   const router = express.Router();
   const padUnlock = requirePadUnlock(padService);
 
@@ -60,8 +63,19 @@ function createRouter(padService: any, getPadClients: (padId: number) => Set<CoM
     try {
       const padId = Number(req.params.id);
       if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
-      const { text, _wsId } = req.body;
-      const updated = await padService.updateText(req.userId, padId, text, _wsId);
+      const { text, _wsId, baseVersion } = req.body;
+      const updated = await padService.updateText(
+        req.userId,
+        padId,
+        text,
+        _wsId,
+        baseVersion ?? null
+      );
+      if (updated && updated.conflict) {
+        return res
+          .status(409)
+          .json({ conflict: true, text: updated.pad.text, textVersion: updated.pad.textVersion });
+      }
       res.json({ ok: true, textVersion: updated.textVersion });
     } catch (e) {
       next(e);
@@ -111,7 +125,10 @@ function createRouter(padService: any, getPadClients: (padId: number) => Set<CoM
       try {
         const padId = Number(req.params.id);
         if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
-        const unlockToken = req.headers['x-pad-token'];
+        // Match any of the comma-separated unlock tokens for THIS pad.
+        const tokens = extractPadTokens(req);
+        const unlockToken =
+          tokens.find((t: string) => padService.isValidUnlockToken(t, padId)) || tokens[0] || null;
         const { password, currentPassword, _wsId } = req.body;
         const result = await padService.setPassword(
           req.userId,

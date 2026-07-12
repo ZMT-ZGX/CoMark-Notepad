@@ -5,7 +5,7 @@
  * SQLite FTS5 underneath. Results clickable to switch pads.
  */
 
-import { state, $, showToast, escapeHtml } from './core.js';
+import { state, $, showToast, escapeHtml, padAuthHeaders } from './core.js';
 import { switchPad } from './pads.js';
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -68,13 +68,30 @@ function closeSearch() {
 async function runSearch(q) {
   const resultsEl = $('#search-results');
   try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
+      headers: padAuthHeaders(),
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     renderResults(data.results || []);
   } catch (e) {
     resultsEl.innerHTML = '<div class="search-empty">Search failed</div>';
   }
+}
+
+// Server wraps FTS matches in U+E000 / U+E001 (not HTML). Escape the whole
+// snippet so pad content cannot inject tags, then turn only those delimiters
+// into <mark> highlights.
+const SNIPPET_MARK_OPEN = '\uE000';
+const SNIPPET_MARK_CLOSE = '\uE001';
+
+function snippetToSafeHtml(snippet) {
+  if (!snippet) return '';
+  return escapeHtml(String(snippet).slice(0, 120))
+    .split(SNIPPET_MARK_OPEN)
+    .join('<mark>')
+    .split(SNIPPET_MARK_CLOSE)
+    .join('</mark>');
 }
 
 function renderResults(results) {
@@ -88,7 +105,7 @@ function renderResults(results) {
       (r) => `
     <div class="search-result" data-pad-id="${r.id}">
       <div class="search-result-id">Pad #${r.id}</div>
-      <div class="search-result-snippet">${r.snippet ? r.snippet.slice(0, 120) : escapeHtml((r.content || '').slice(0, 120))}</div>
+      <div class="search-result-snippet">${snippetToSafeHtml(r.snippet) || escapeHtml((r.content || '').slice(0, 120))}</div>
     </div>`
     )
     .join('');

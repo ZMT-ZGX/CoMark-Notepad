@@ -5,7 +5,10 @@ import type { CoMarkWebSocket } from '../types';
 const padClients = new Map<number, Set<CoMarkWebSocket>>(); // padId -> Set<ws>
 const wsConnectionsPerIp = new Map<string, number>(); // tracks active WS connections per IP
 
-function add(ws: CoMarkWebSocket, meta: { clientId: string; padId: number; userId: string | null; ipAddress: string }): void {
+function add(
+  ws: CoMarkWebSocket,
+  meta: { clientId: string; padId: number; userId: string | null; ipAddress: string }
+): void {
   ws.clientId = meta.clientId;
   ws.padId = meta.padId;
   ws.userId = meta.userId;

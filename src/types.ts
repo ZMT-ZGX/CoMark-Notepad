@@ -78,13 +78,18 @@ export interface WsPatch {
   type: 'patch';
   padId: number;
   data: string;
+  text?: string;
   textVersion: number;
   senderId: string | null;
+  operationId?: string;
+  baseVersion?: number;
 }
 
 export interface WsPatchAck {
   type: 'patch-ack';
   textVersion: number;
+  text?: string;
+  seq?: number;
 }
 
 // Server → sender only. Issued when a patch fails to apply (concurrent
@@ -173,6 +178,9 @@ export interface CoMarkWebSocket extends WebSocket {
   userId: string | null;
   ipAddress: string;
   isAlive: boolean;
+  // Unlock token presented at connect time for password-protected pads.
+  // Re-validated on every patch so expiry / password-change revokes writes.
+  unlockToken: string | null;
   // Per-connection patch rate-limit state (fixed window). See ws/index.ts.
   patchWindowStart: number;
   patchCount: number;

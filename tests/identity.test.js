@@ -1117,17 +1117,25 @@ test('legacy public file cannot be deleted anonymously', async () => {
     });
     assert.equal(anonDel.status, 401, 'anonymous delete of legacy public file should be rejected');
 
-    // Regular auth user cannot delete legacy pad files (requires admin)
+    // On a legacy public pad (no owner/creator) any authenticated user may
+    // delete files — this is a single-user local notepad, so file ownership
+    // must not block the owner from removing their own older files.
     const other = await registerUser(server.baseUrl);
     const del = await fetch(`${server.baseUrl}/api/files/${file.id}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json', ...cookieHeader(other.cookie), Origin: server.baseUrl },
       body: JSON.stringify({}),
     });
-    assert.equal(del.status, 403, 'regular auth user cannot delete legacy pad files');
+    assert.equal(del.status, 200, 'regular auth user can delete legacy public pad files');
 
-    // Admin can delete
-    const adminDel = await fetch(`${server.baseUrl}/api/files/${file.id}`, {
+    // Admin can also delete (fresh upload so the file still exists).
+    const adminForm = new FormData();
+    adminForm.append('padId', '1');
+    adminForm.append('file', new Blob(['y'], { type: 'text/plain' }), 'legacy-admin.txt');
+    const adminUpload = await fetch(`${server.baseUrl}/api/upload`, { method: 'POST', body: adminForm, headers: { Origin: server.baseUrl } });
+    const adminFile = await adminUpload.json();
+
+    const adminDel = await fetch(`${server.baseUrl}/api/files/${adminFile.id}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json', 'x-admin-token': 'admin123', Origin: server.baseUrl },
       body: JSON.stringify({}),
@@ -1218,7 +1226,7 @@ test('password-protected pad files require unlock token for delete and clear', a
   }
 });
 
-test('legacy public pad files cannot be cleared by regular users', async () => {
+test('legacy public pad files can be cleared by regular users', async () => {
   const server = await startServer({ ADMIN_TOKEN: 'admin123' });
   try {
     const formData = new FormData();
@@ -1231,13 +1239,20 @@ test('legacy public pad files cannot be cleared by regular users', async () => {
     });
     assert.equal(upload.status, 200);
 
+    // On a legacy public pad any authenticated user may clear files.
     const other = await registerUser(server.baseUrl);
     const regularClear = await fetch(`${server.baseUrl}/api/files`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json', ...cookieHeader(other.cookie), Origin: server.baseUrl },
       body: JSON.stringify({ padId: 1 }),
     });
-    assert.equal(regularClear.status, 403);
+    assert.equal(regularClear.status, 200);
+
+    // Admin can also clear (fresh upload so there is something to clear).
+    const adminForm = new FormData();
+    adminForm.append('padId', '1');
+    adminForm.append('file', new Blob(['y'], { type: 'text/plain' }), 'legacy-clear-admin.txt');
+    await fetch(`${server.baseUrl}/api/upload`, { method: 'POST', body: adminForm, headers: { Origin: server.baseUrl } });
 
     const adminClear = await fetch(`${server.baseUrl}/api/files`, {
       method: 'DELETE',

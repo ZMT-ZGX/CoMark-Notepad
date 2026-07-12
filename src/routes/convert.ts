@@ -25,14 +25,20 @@ function createRouter(convertService: any, padService: any) {
   });
 
   // Convert file to Markdown
-  router.post('/:fileId', convertLimiter, checkOrigin, convertPadUnlock, async (req: any, res: any, next: any) => {
-    try {
-      const result = await convertService.convert(req.userId, req.params.fileId);
-      res.json(result);
-    } catch (e) {
-      next(e);
+  router.post(
+    '/:fileId',
+    convertLimiter,
+    checkOrigin,
+    convertPadUnlock,
+    async (req: any, res: any, next: any) => {
+      try {
+        const result = await convertService.convert(req.userId, req.params.fileId);
+        res.json(result);
+      } catch (e) {
+        next(e);
+      }
     }
-  });
+  );
 
   return router;
 }

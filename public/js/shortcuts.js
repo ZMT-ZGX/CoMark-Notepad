@@ -78,6 +78,13 @@ function toggleFileSearch() {
  * @param {HotkeysFn} hotkeysFn
  */
 export function initShortcuts(hotkeysFn) {
+  // The hotkeys-js global is loaded from a CDN <script>. If it failed to load
+  // (e.g. blocked by CSP), skip silently instead of throwing and aborting the
+  // whole app init chain.
+  if (typeof hotkeysFn !== 'function') {
+    console.warn('hotkeys-js not available; keyboard shortcuts disabled');
+    return;
+  }
   // Allow hotkeys to fire even when focus is inside <input> / <textarea>.
   // This is essential for Ctrl+S (save), Ctrl+E (export), etc.
   hotkeysFn.filter = (event) => {

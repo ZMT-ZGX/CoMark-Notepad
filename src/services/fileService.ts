@@ -15,13 +15,24 @@ const { generateId } = require('../utils/crypto');
 const { formatBytes, downloadBasename } = require('../utils/file');
 const { MAX_FILE_BYTES } = require('../config');
 const logger = require('../utils/logger');
+const { extractPadTokens, hasValidUnlockToken } = require('../middlewares/security');
+
+// A pad is public when it has neither an owner nor a creator code — accessible
+// to anyone. Centralized here so the same definition is reused everywhere.
+function isPublicPad(pad: Pad): boolean {
+  return !pad.ownerUserId && !pad.creatorCode;
+}
 
 class FileService {
   store: DataStore;
   broadcast: Broadcast;
   padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null;
 
-  constructor(store: DataStore, broadcast: Broadcast, padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null) {
+  constructor(
+    store: DataStore,
+    broadcast: Broadcast,
+    padService: { isValidUnlockToken(token: unknown, padId: number): boolean } | null
+  ) {
     this.store = store;
     this.broadcast = broadcast;
     this.padService = padService || null;
@@ -54,8 +65,8 @@ class FileService {
 
   getPadForFileById(fileId: string): Pad | null {
     const file = this.store.findFileById(fileId);
-    if (!file) return null;
-    return this.store.findPadById(file.padId ?? 1) || null;
+    if (!file || file.padId == null) return null;
+    return this.store.findPadById(file.padId) || null;
   }
 
   async upload(req: any, res: any) {
@@ -108,8 +119,17 @@ class FileService {
       res.status(status).json({ error });
     };
 
+    // Detect a genuine client-side abort. `req.on('aborted')` has been deprecated
+    // since Node 16; the supported replacement is `req.on('close')` combined with
+    // a check that the request body was NOT fully received (`req.complete`). We
+    // must NOT key off `req.destroyed`, which also becomes true during the normal
+    // end-of-request teardown once the body has been read — larger multipart
+    // bodies make `close` fire (with destroyed=true) before busboy's `finish`, so
+    // the old check aborted valid uploads mid-write and the request hung forever
+    // waiting on a write promise that never settled.
     req.on('close', () => {
-      if (!finished && req.destroyed && !busboyFinished) {
+      if (req.complete) return; // body fully received → normal completion, not an abort
+      if (!finished && !busboyFinished) {
         aborted = true;
         cleanupPartialFile();
       }
@@ -123,63 +143,66 @@ class FileService {
     busboy.on('filesLimit', () => fail(400, 'Only one file allowed'));
     busboy.on('partsLimit', () => fail(400, 'Too many form parts'));
 
-    busboy.on('file', (name: string, file: any, info: { filename: string; mimeType: string; encoding: string }) => {
-      if (name !== 'file' || fileSeen) {
-        file.resume();
-        return;
-      }
-      fileSeen = true;
-
-      const originalName = downloadBasename(info.filename, '');
-      if (!originalName) {
-        file.resume();
-        return;
-      }
-
-      const id = generateId();
-      const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
-      const filename = `${id}_${safeName}`;
-      filePath = path.join(this.store.FILES_DIR, filename);
-
-      // Early access check
-      if (padIdField !== null) {
-        const earlyPad = this.store.findPadById(padIdField);
-        if (earlyPad && !this.canAccessPad(req.userId, earlyPad)) {
-          uploadAccessDenied = true;
+    busboy.on(
+      'file',
+      (name: string, file: any, info: { filename: string; mimeType: string; encoding: string }) => {
+        if (name !== 'file' || fileSeen) {
           file.resume();
           return;
         }
+        fileSeen = true;
+
+        const originalName = downloadBasename(info.filename, '');
+        if (!originalName) {
+          file.resume();
+          return;
+        }
+
+        const id = generateId();
+        const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
+        const filename = `${id}_${safeName}`;
+        filePath = path.join(this.store.FILES_DIR, filename);
+
+        // Early access check
+        if (padIdField !== null) {
+          const earlyPad = this.store.findPadById(padIdField);
+          if (earlyPad && !this.canAccessPad(req.userId, earlyPad)) {
+            uploadAccessDenied = true;
+            file.resume();
+            return;
+          }
+        }
+
+        fileInfo = {
+          id,
+          filename,
+          originalName,
+          size: 0,
+          mimeType: (info.mimeType || 'application/octet-stream').toLowerCase(),
+          createdAt: Date.now(),
+          ownerUserId: null,
+          padId: 1,
+        } as import('../types').FileInfo;
+
+        writeStream = fs.createWriteStream(filePath, { flags: 'wx' });
+        fileWritePromise = new Promise((resolve, reject) => {
+          writeStream.on('finish', resolve);
+          writeStream.on('error', reject);
+          file.on('error', reject);
+        });
+        fileWritePromise.catch(() => {});
+
+        file.on('limit', () => {
+          fileLimitReached = true;
+          if (writeStream) writeStream.destroy(new Error('File too large'));
+        });
+
+        file.pipe(writeStream);
+        file.on('data', (chunk: Buffer) => {
+          if (fileInfo) fileInfo.size += chunk.length;
+        });
       }
-
-      fileInfo = {
-        id,
-        filename,
-        originalName,
-        size: 0,
-        mimeType: (info.mimeType || 'application/octet-stream').toLowerCase(),
-        createdAt: Date.now(),
-        ownerUserId: null,
-        padId: 1,
-      } as import('../types').FileInfo;
-
-      writeStream = fs.createWriteStream(filePath, { flags: 'wx' });
-      fileWritePromise = new Promise((resolve, reject) => {
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-        file.on('error', reject);
-      });
-      fileWritePromise.catch(() => {});
-
-      file.on('limit', () => {
-        fileLimitReached = true;
-        if (writeStream) writeStream.destroy(new Error('File too large'));
-      });
-
-      file.pipe(writeStream);
-      file.on('data', (chunk: Buffer) => {
-        if (fileInfo) fileInfo.size += chunk.length;
-      });
-    });
+    );
 
     busboy.on('error', () => fail(400, 'Invalid multipart form data'));
 
@@ -214,14 +237,12 @@ class FileService {
       // Authoritative access check
       if (!this.canAccessPad(req.userId, targetPad)) return fail(403, 'Access denied');
 
-      // Pad lock check
+      // Pad lock check — header only (query tokens land in access / proxy logs).
+      // Use shared extractPadTokens so comma-separated multi-token headers work.
       if (
         targetPad.password &&
         (!this.padService ||
-          !this.padService.isValidUnlockToken(
-            req.headers['x-pad-token'] || req.query?.padToken,
-            targetPad.id
-          ))
+          !hasValidUnlockToken(this.padService, extractPadTokens(req), targetPad.id))
       ) {
         return fail(403, 'Pad locked');
       }
@@ -232,7 +253,11 @@ class FileService {
       finalInfo.padId = targetPadId;
 
       this.store.createFile(finalInfo);
-      this.broadcast.toPad(finalInfo.padId, { type: 'file-added', padId: finalInfo.padId, file: finalInfo }, excludeWsId);
+      this.broadcast.toPad(
+        finalInfo.padId,
+        { type: 'file-added', padId: finalInfo.padId, file: finalInfo },
+        excludeWsId
+      );
       finished = true;
       if (!res.headersSent) res.json(finalInfo);
     });
@@ -240,14 +265,21 @@ class FileService {
     req.pipe(busboy);
   }
 
-  async downloadFile(userId: string | null, fileId: string, unlockToken: string | undefined): Promise<{ file: FileInfo; filepath: string }> {
+  async downloadFile(
+    userId: string | null,
+    fileId: string,
+    unlockTokens: string[] = []
+  ): Promise<{ file: FileInfo; filepath: string }> {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
     if (!this.canAccessFile(userId, file)) throw NotFoundError('File not found');
-    const pad = this.store.findPadById(file.padId ?? 1);
+    // Do not coerce missing padId to 1 — that mis-attributes lock checks.
+    if (file.padId == null) throw NotFoundError('File not found');
+    const pad = this.store.findPadById(file.padId);
+    if (!pad) throw NotFoundError('File not found');
     if (
-      pad?.password &&
-      (!this.padService || !this.padService.isValidUnlockToken(unlockToken, pad.id))
+      pad.password &&
+      (!this.padService || !hasValidUnlockToken(this.padService, unlockTokens, pad.id))
     ) {
       throw ForbiddenError('Pad locked');
     }
@@ -255,22 +287,39 @@ class FileService {
     return { file, filepath };
   }
 
-  async deleteFile(userId: string | null, isAdminUser: boolean, fileId: string, excludeWsId: string | undefined) {
+  async deleteFile(
+    userId: string | null,
+    isAdminUser: boolean,
+    fileId: string,
+    excludeWsId: string | undefined
+  ) {
     const file = this.store.findFileById(fileId);
     if (!file) throw NotFoundError('File not found');
+    if (file.padId == null) throw NotFoundError('File not found');
 
-    const pad = this.store.findPadById(file.padId ?? 1);
+    const pad = this.store.findPadById(file.padId);
     if (!pad) throw NotFoundError('Pad not found');
 
     // Permission check
-    if (file.ownerUserId) {
+    const padIsPublic = isPublicPad(pad);
+    if (padIsPublic && userId) {
+      // Public pad (no owner, no creator): any authenticated user may delete
+      // files. Ownership is intentionally ignored — this is a single-user
+      // local notepad, and file ownership is otherwise scattered across the
+      // ephemeral auto-registered identities created on each restart, leaving
+      // the user unable to delete their own older files.
+    } else if (file.ownerUserId) {
       if (userId !== file.ownerUserId && !isAdminUser) {
         if (!this.canManagePad(userId, isAdminUser, pad)) {
           throw ForbiddenError('Access denied');
         }
       }
     } else {
-      if (!this.canManagePad(userId, isAdminUser, pad)) {
+      // Unowned file (e.g. uploaded by a guest to a public pad). The route
+      // already rejects anonymous deletions of unowned files with 401, so here
+      // any authenticated user may remove it. Restricted (owned) pads never
+      // produce unowned files, so this does not weaken private-pad safety.
+      if (!userId && !isAdminUser) {
         throw ForbiddenError('Access denied');
       }
     }
@@ -279,15 +328,30 @@ class FileService {
     try {
       fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
     } catch {}
-    this.broadcast.toPad(file.padId ?? 1, { type: 'file-deleted', padId: file.padId ?? 1, fileId }, excludeWsId);
+    this.broadcast.toPad(
+      file.padId,
+      { type: 'file-deleted', padId: file.padId, fileId },
+      excludeWsId
+    );
     return { ok: true };
   }
 
-  async clearFiles(userId: string | null, isAdminUser: boolean, padId: number, excludeWsId: string | undefined) {
+  async clearFiles(
+    userId: string | null,
+    isAdminUser: boolean,
+    padId: number,
+    excludeWsId: string | undefined
+  ) {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
 
-    if (!this.canManagePad(userId, isAdminUser, pad)) {
+    // On a public pad (no owner, no creator) any authenticated user may clear
+    // all files, consistent with single-file deletion. Otherwise only a pad
+    // manager (owner/admin) may clear. Anonymous users are always rejected.
+    const canClear = isPublicPad(pad)
+      ? !!userId || isAdminUser
+      : this.canManagePad(userId, isAdminUser, pad);
+    if (!canClear) {
       throw ForbiddenError('Access denied');
     }
 

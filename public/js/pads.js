@@ -67,20 +67,19 @@ export function renderPadTabs() {
 
 export async function switchPad(padId) {
   if (padId === state.currentPadId) return;
-  // Flush pending text sync for the old pad before switching
+  // Persist the OLD pad's in-flight op / pending edits into its offline queue
+  // BEFORE touching shared connection state, so they can't be lost or leak
+  // into the new pad (P1 #3). The per-pad sync map keeps the old pad's shadow
+  // isolated, so returning to it later resumes cleanly.
   if (state.sendTimeout) {
     clearTimeout(state.sendTimeout);
     const { sendTextNow } = await import('./text-sync.js');
-    await sendTextNow();
+    await sendTextNow(state.currentPadId);
   }
-  const { flushPatchQueue } = await import('./text-sync.js');
-  flushPatchQueue(state.currentPadId); // flush old pad queue if WS open
+  const { requeueInflight } = await import('./text-sync.js');
+  requeueInflight(state.currentPadId);
 
-  state.lastTextRequestId = 0;
   state.currentPadId = padId;
-  state.textVersion = 0;
-  state.pendingRemoteState = null;
-  state.lastSyncedText = '';
   $('#text-input').value = '';
 
   renderPadTabs();
@@ -141,8 +140,8 @@ export async function loadPadContent() {
     if (padId !== state.currentPadId) return;
     const nextVersion = Number.isInteger(data.textVersion) ? data.textVersion : 0;
     // Import text-sync lazily to avoid circular dep at init time
-    const { applyTextState } = await import('./text-sync.js');
-    applyTextState(data.text || '', nextVersion);
+    const { applyLoadedText } = await import('./text-sync.js');
+    applyLoadedText(data.text || '', nextVersion, padId);
   } catch (e) {
     console.warn('Failed to load pad content:', e);
   }
@@ -194,7 +193,6 @@ async function showDeletePadMenu(padId) {
             .sort((a, b) => a.createdAt - b.createdAt)[0];
           if (nextPad) {
             state.currentPadId = nextPad.id;
-            state.textVersion = 0;
             await loadPadContent();
             connectWS();
           }

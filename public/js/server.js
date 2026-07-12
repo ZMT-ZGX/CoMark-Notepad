@@ -1,31 +1,35 @@
-import { state, getPadToken, safeJsonParse, MAX_FILE_SIZE } from './core.js';
+import { state, padAuthHeaders, safeJsonParse, MAX_FILE_SIZE } from './core.js';
 
 // --- Pad API ---
 
 export async function fetchState() {
-  const res = await fetch('/api/state');
+  // All stored unlock tokens so locked pads' file lists are included when unlocked.
+  const res = await fetch('/api/state', { headers: padAuthHeaders() });
   if (!res.ok) throw new Error('Failed to load state');
   return res.json();
 }
 
 export async function fetchPadContent(padId) {
-  const token = getPadToken(padId);
-  const headers = {};
-  if (token) headers['X-Pad-Token'] = token;
-  return fetch(`/api/pads/${padId}`, { headers });
+  return fetch(`/api/pads/${padId}`, { headers: padAuthHeaders(padId) });
 }
 
-export async function updatePadText(padId, text, wsId) {
-  const token = getPadToken(padId);
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-Pad-Token'] = token;
+export async function updatePadText(padId, text, wsId, baseVersion) {
+  const headers = padAuthHeaders(padId, { 'Content-Type': 'application/json' });
+  const body = { text, _wsId: wsId };
+  if (baseVersion != null) body.baseVersion = baseVersion;
   const res = await fetch(`/api/pads/${padId}/text`, {
     method: 'PUT',
     headers,
-    body: JSON.stringify({ text, _wsId: wsId }),
+    body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error('Failed to sync text');
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error('Failed to sync text');
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
 }
 
 export async function createPadApi() {
@@ -35,10 +39,10 @@ export async function createPadApi() {
 }
 
 export async function deletePadApi(padId) {
-  const token = getPadToken(padId);
-  const headers = {};
-  if (token) headers['X-Pad-Token'] = token;
-  const res = await fetch(`/api/pads/${padId}`, { method: 'DELETE', headers });
+  const res = await fetch(`/api/pads/${padId}`, {
+    method: 'DELETE',
+    headers: padAuthHeaders(padId),
+  });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || 'Delete failed');
@@ -46,9 +50,7 @@ export async function deletePadApi(padId) {
 }
 
 export async function setPadPassword(padId, password, currentPassword, wsId = state.wsId) {
-  const token = getPadToken(padId);
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-Pad-Token'] = token;
+  const headers = padAuthHeaders(padId, { 'Content-Type': 'application/json' });
   const body = { password: password || null };
   if (currentPassword) body.currentPassword = currentPassword;
   if (wsId) body._wsId = wsId;
@@ -80,9 +82,9 @@ export async function unlockPadApi(padId, password) {
 // --- File API ---
 
 export async function deleteFileApi(fileId, padId) {
-  const token = getPadToken(padId || state.currentPadId);
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-Pad-Token'] = token;
+  const headers = padAuthHeaders(padId || state.currentPadId, {
+    'Content-Type': 'application/json',
+  });
   const res = await fetch(`/api/files/${fileId}`, {
     method: 'DELETE',
     headers,
@@ -95,9 +97,9 @@ export async function deleteFileApi(fileId, padId) {
 }
 
 export async function convertFileApi(fileId, padId) {
-  const token = getPadToken(padId || state.currentPadId);
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-Pad-Token'] = token;
+  const headers = padAuthHeaders(padId || state.currentPadId, {
+    'Content-Type': 'application/json',
+  });
   const res = await fetch(`/api/convert/${fileId}`, {
     method: 'POST',
     headers,

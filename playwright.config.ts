@@ -1,5 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
-import { rmSync } from 'fs';
+import { mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 
 /**
@@ -8,24 +8,22 @@ import { join } from 'path';
  * The dev server is started automatically on port 8111 before tests run
  * and stopped afterwards.  Tests never touch the development port 8000.
  *
- * The project's own `data/` directory is used, but the SQLite database is
- * deleted before the server starts so each test run begins with a clean
- * state (only the seed pad).
+ * A dedicated, isolated data directory (`tests/e2e/.e2e-data-dir`) is used and
+ * injected via `DATA_DIR`.  This ensures E2E runs NEVER touch the developer's
+ * real `data/` directory (which may contain live pads/files) — the previous
+ * config deleted `data/store.db` from the repo, causing real data loss.
  *
  * A `globalSetup` registers a test user and saves the session cookie to
  * `.auth/state.json`.  All tests then share this authenticated state,
  * keeping registrations under the rate-limiter cap.
  */
 
-// Clean the SQLite database (and WAL/SHM files) before starting the test server
-// so each run starts fresh with only the seed pad.
-const DATA_DIR = join(__dirname, 'data');
-rmSync(join(DATA_DIR, 'store.db'), { force: true });
-rmSync(join(DATA_DIR, 'store.db-wal'), { force: true });
-rmSync(join(DATA_DIR, 'store.db-shm'), { force: true });
-
-// Also clean any leftover JSON store
-rmSync(join(DATA_DIR, 'store.json'), { force: true });
+// Use an isolated E2E data dir so we never delete the developer's real data/.
+// Clear any prior run's state, then recreate the (empty) directory so the
+// server can persist its dev SESSION_SECRET and SQLite DB into it on startup.
+const E2E_DATA_DIR = join(__dirname, 'tests', 'e2e', '.e2e-data-dir');
+rmSync(E2E_DATA_DIR, { recursive: true, force: true });
+mkdirSync(E2E_DATA_DIR, { recursive: true });
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -57,6 +55,11 @@ export default defineConfig({
     env: {
       PORT: '8111',
       NODE_ENV: 'development',
+      DATA_DIR: E2E_DATA_DIR,
+      // The suite drives many browser contexts sequentially from 127.0.0.1;
+      // frontend auto-reconnect can briefly stack connections. Raise the per-IP
+      // WS cap so later tests aren't rejected by the default limit (10).
+      MAX_WS_CONNECTIONS_PER_IP: '100',
     },
     reuseExistingServer: false,
     timeout: 15_000,

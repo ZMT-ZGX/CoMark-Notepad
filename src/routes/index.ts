@@ -1,7 +1,7 @@
 'use strict';
 
 const rateLimit = require('express-rate-limit');
-const { checkOrigin } = require('../middlewares/security');
+const { checkOrigin, extractPadTokens } = require('../middlewares/security');
 
 const createAuthRouter = require('./auth');
 const createPadsRouter = require('./pads');
@@ -18,7 +18,12 @@ const uploadLimiter = rateLimit({
   message: { error: 'Too many uploads.' },
 });
 
-function mountRoutes(app: any, services: any, getServerPort: (() => number) | null, getPadClients: (padId: number) => Set<any> | undefined) {
+function mountRoutes(
+  app: any,
+  services: any,
+  getServerPort: (() => number) | null,
+  getPadClients: (padId: number) => Set<any> | undefined
+) {
   const { db, padService, fileService, inviteService, convertService } = services;
 
   app.use('/api/auth', createAuthRouter(db));
@@ -26,7 +31,8 @@ function mountRoutes(app: any, services: any, getServerPort: (() => number) | nu
   // Global state endpoint (mounted at /api, not /api/pads)
   app.get('/api/state', async (req: any, res: any, next: any) => {
     try {
-      const state = await padService.getState(req.userId);
+      // Unlock tokens (header only) gate file metadata of password-protected pads.
+      const state = await padService.getState(req.userId, extractPadTokens(req));
       res.json(state);
     } catch (e) {
       if (res.headersSent) return;

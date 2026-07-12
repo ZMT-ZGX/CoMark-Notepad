@@ -7,14 +7,23 @@
 
 import type { Pad, FileInfo } from '../types';
 
-function canAccessPad(userId: string | null, pad: Pad, hasAccessGrantFn?: (ownerId: string, uid: string) => boolean): boolean {
+function canAccessPad(
+  userId: string | null,
+  pad: Pad,
+  hasAccessGrantFn?: (ownerId: string, uid: string) => boolean
+): boolean {
   if (!pad.ownerUserId) return true; // public pad
   if (!userId) return false;
   if (pad.ownerUserId === userId) return true; // owner
   return hasAccessGrantFn ? hasAccessGrantFn(pad.ownerUserId, userId) : false;
 }
 
-function canAccessFile(userId: string | null, file: FileInfo, findPadById: (id: number) => Pad | undefined, hasAccessGrantFn: (ownerId: string, uid: string) => boolean): boolean {
+function canAccessFile(
+  userId: string | null,
+  file: FileInfo,
+  findPadById: (id: number) => Pad | undefined,
+  hasAccessGrantFn: (ownerId: string, uid: string) => boolean
+): boolean {
   if (!file.ownerUserId) return true; // public file
   if (!userId) return false;
   if (file.ownerUserId === userId) return true;

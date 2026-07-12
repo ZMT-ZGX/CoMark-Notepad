@@ -1,13 +1,41 @@
 // Shared application state — mutable singleton imported by all modules
+// --- Per-pad reliable-delivery sync state ---
+// Each pad gets its own isolated sync state so that switching pads (or a
+// reconnect) can never let one pad's in-flight patch leak into another, and
+// the model is a simple "one confirmed shadow + one in-flight op + one pending
+// target text" instead of a global array of parallel patches.
+//   lastSyncedText : confirmed shadow (base for computing diffs)
+//   textVersion    : confirmed server version
+//   inflight       : the single op currently in flight (WS patch seq or HTTP
+//                    sentinel), or null. Only one exists at a time.
+//   pendingTarget  : the latest local text we intend to reach; once the
+//                    in-flight op is acknowledged we diff shadow → pendingTarget
+//                    to send any newer edits.
+//   requestToken   : monotonic (never reset) per-pad token for HTTP-fallback
+//                    request/response matching, so a stale response from a
+//                    previous pad can never be applied to the new one.
+//   pendingRemoteState : remote text deferred while the editor is focused.
+export function getPadSync(padId) {
+  if (!state.padSync[padId]) {
+    state.padSync[padId] = {
+      lastSyncedText: '',
+      textVersion: 0,
+      inflight: null,
+      pendingTarget: null,
+      requestToken: 0,
+      pendingRemoteState: null,
+      seenOperations: new Set(),
+    };
+  }
+  return state.padSync[padId];
+}
+
 export const state = {
   ws: null,
   wsId: null,
   currentPadId: 1,
   pads: [],
   allFiles: [],
-  textVersion: 0,
-  pendingRemoteState: null,
-  lastTextRequestId: 0,
   reconnectTimer: null,
   reconnectAttempts: 0,
   userCode: null,
@@ -15,7 +43,8 @@ export const state = {
   toastTimer: null,
   previewTargetId: null,
   sendTimeout: null,
-  lastSyncedText: '',
+  // Per-pad reliable-delivery state (see getPadSync).
+  padSync: {},
   patchQueueKey(padId = this.currentPadId) {
     return `patch-queue:${padId || 1}`;
   },
@@ -26,7 +55,7 @@ export const state = {
     try { localStorage.setItem(this.patchQueueKey(padId), JSON.stringify(q)); } catch {}
   },
   convertCapabilities: {
-    maxBytes: 10 * 1024 * 1024,
+    maxBytes: 100 * 1024 * 1024,
     timeoutMs: 60 * 1000,
     extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'csv', 'txt', 'log', 'html', 'htm', 'json', 'xml', 'yaml', 'yml', 'jpg', 'jpeg', 'png', 'gif'],
     features: { pptx: true, imageMetadata: true, imageCaption: false, ocr: false },
@@ -58,6 +87,14 @@ export function getPadToken(padId) {
   try { return JSON.parse(sessionStorage.getItem('pad-tokens') || '{}')[padId] || null; } catch { return null; }
 }
 
+export function getAllPadTokens() {
+  try {
+    return Object.values(JSON.parse(sessionStorage.getItem('pad-tokens') || '{}')).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export function setPadToken(padId, token) {
   try {
     const tokens = JSON.parse(sessionStorage.getItem('pad-tokens') || '{}');
@@ -65,6 +102,20 @@ export function setPadToken(padId, token) {
     else delete tokens[padId];
     sessionStorage.setItem('pad-tokens', JSON.stringify(tokens));
   } catch {}
+}
+
+// Build request headers carrying X-Pad-Token. Pass a padId for that pad's
+// token, or omit it to send every stored unlock token (search / state).
+export function padAuthHeaders(padId, base = {}) {
+  const headers = { ...base };
+  if (padId != null) {
+    const token = getPadToken(padId);
+    if (token) headers['X-Pad-Token'] = token;
+  } else {
+    const tokens = getAllPadTokens();
+    if (tokens.length) headers['X-Pad-Token'] = tokens.join(',');
+  }
+  return headers;
 }
 
 // --- Pad Data Operations ---

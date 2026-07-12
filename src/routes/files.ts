@@ -2,7 +2,7 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { checkOrigin, requirePadUnlock } = require('../middlewares/security');
+const { checkOrigin, requirePadUnlock, extractPadTokens } = require('../middlewares/security');
 const { isAdmin } = require('../middlewares/auth');
 const { contentDisposition } = require('../utils/file');
 const { UnauthorizedError } = require('../utils/errors');
@@ -27,11 +27,13 @@ function createRouter(fileService: any, padService: any) {
   // Download file
   router.get('/:id', async (req: any, res: any, next: any) => {
     try {
-      const unlockToken = req.headers['x-pad-token'] || req.query?.padToken;
+      // Header only — query padToken would land in access / proxy logs.
+      // Pass all tokens so the correct pad's unlock is matched (not just [0]).
+      const unlockTokens = extractPadTokens(req);
       const { file, filepath } = await fileService.downloadFile(
         req.userId,
         req.params.id,
-        unlockToken
+        unlockTokens
       );
 
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -61,9 +63,10 @@ function createRouter(fileService: any, padService: any) {
       try {
         const excludeWsId = req.body._wsId;
 
-        // Legacy public file (no owner): require authentication (401 vs 403)
+        // Anonymous deletion of any file: prompt login (401) rather than
+        // letting it fall through to a confusing "Access denied" (403).
         const file = fileService.getFileById(req.params.id);
-        if (file && !file.ownerUserId && !req.userId && !isAdmin(req)) {
+        if (file && !req.userId && !isAdmin(req)) {
           throw UnauthorizedError('Authentication required');
         }
 
