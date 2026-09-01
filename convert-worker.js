@@ -519,10 +519,54 @@ async function convertPptx(buffer) {
   return sections.join('\n\n---\n\n');
 }
 
+function extractImageDimensions(buf) {
+  // PNG: width & height in IHDR chunk at offset 16 and 20 (big-endian 32-bit uint)
+  if (
+    buf.length >= 24 &&
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
+  ) {
+    return { type: 'png', width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+
+  // GIF: width & height at offset 6 and 8 (little-endian 16-bit uint)
+  if (
+    buf.length >= 10 &&
+    (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a')
+  ) {
+    return { type: 'gif', width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) };
+  }
+
+  // JPEG: scan SOF markers (SOF0=0xC0, SOF1=0xC1, SOF2=0xC2, SOF3=0xC3)
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    let off = 2;
+    let found = false;
+    while (off + 4 <= buf.length) {
+      if (buf[off] !== 0xff) break;
+      const marker = buf[off + 1];
+      if (marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) break;
+      const len = buf.readUInt16BE(off + 2);
+      if (len < 2) break;
+      if (marker >= 0xc0 && marker <= 0xc3 && off + 9 <= buf.length) {
+        return {
+          type: 'jpg',
+          height: buf.readUInt16BE(off + 5),
+          width: buf.readUInt16BE(off + 7),
+        };
+      }
+      off += 2 + len;
+    }
+    if (!found) {
+      throw new Error('Invalid or truncated JPEG image');
+    }
+  }
+
+  return { type: 'image', width: '?', height: '?' };
+}
+
 async function convertImage(buffer, originalName) {
-  const { imageSize } = require('image-size');
   const buf = Buffer.from(buffer);
-  const dims = imageSize(buf);
+  const dims = extractImageDimensions(buf);
 
   const lines = [
     `# ${originalName || 'image'}`,
