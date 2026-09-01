@@ -8,13 +8,14 @@ A self-hosted, LAN-first collaborative notepad. Think Google Docs meets a sticky
 
 For small teams / families on a local network who want zero-friction collaboration without signing up for SaaS. Scan a QR code, get editing.
 
-## Current State (as of v1.1.2 + Unreleased security pass)
+## Current State (as of v1.2.0)
 
 - **Mature**: Multiple code-review rounds; security pass covering search XSS, unlock-token log exposure, locked-pad gating, WS re-auth on write
-- **Stable**: **74** integration/unit tests all passing; `tsc --noEmit` clean
-- **Security-hardened**: CSRF protection, rate limiting, timing-safe auth, CSP headers, path traversal prevention, FTS snippet XSS-safe delimiters, unlock tokens header-only
+- **Stable**: **75** integration/unit tests all passing; `tsc --noEmit` clean; ESLint clean
+- **Security-hardened**: CSRF protection, rate limiting, timing-safe auth, CSP headers, path traversal prevention, FTS snippet XSS-safe delimiters, unlock tokens header-only, log redaction of `cookie` / `authorization` / `x-pad-token`
 - **Feature-complete**: Multi-pad, patch-based WebSocket sync (per-pad reliable delivery), FTS5 search, file upload/convert (100MB), password protection, invitation system, dark/light theme, mobile-optimized
-- **Patch-based collaboration**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; offline queue in localStorage; cursor preservation on remote apply
+- **Patch-based collaboration**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; offline queue in localStorage; caret mapping (`mapCaret()`) on remote apply; IME-safe editor writes
+- **Self-hosting ready**: Docker Compose + Caddy automatic HTTPS; deploy script with health-gated auto-rollback; consistent SQLite backups; full runbook in `docs/DEPLOYMENT.md`
 
 ## Key Files & Their Roles
 
@@ -51,6 +52,12 @@ For small teams / families on a local network who want zero-friction collaborati
 | `public/vendor/diff_match_patch.js` | CommonJS → window.* wrapper |
 | `public/style.css` | Apple-style design, dark/light, mobile responsive |
 | `convert-worker.js` | Worker thread: file → Markdown |
+| `Caddyfile` | Reverse proxy + automatic HTTPS — the only public entrypoint |
+| `docker-compose.yml` | App + Caddy; service-level `mem_limit` / `cpus`, log rotation, hardening |
+| `scripts/deploy.sh` | Backup → build → restart → health gate → auto-rollback on failure |
+| `scripts/backup.sh` | Consistent SQLite snapshot + uploads archive, with retention |
+| `scripts/sqlite-backup.js` | Runs inside the container; uses SQLite's backup API |
+| `docs/DEPLOYMENT.md` | Self-hosting runbook: setup, backup/restore, tuning, troubleshooting |
 | `tests/identity.test.js` | Auth, invitations, access control, WS padToken |
 | `tests/smoke.test.js` | Core API, WebSocket flow, locked search gating |
 | `tests/convert.test.js` | Worker conversion correctness |
@@ -63,7 +70,7 @@ For small teams / families on a local network who want zero-friction collaborati
 - **SQLite + FTS5** — `pad_search` virtual table with 3 triggers; WAL + `busy_timeout=5000`; XSS-safe snippet delimiters
 - **Unlock tokens** — header-only `X-Pad-Token` (multi-token OK); WS first-message auth; re-check on every write
 - **No frontend framework** — vanilla JS with `$()` helper, ES Modules
-- **Worker isolation** — each file conversion runs in a fresh Worker thread with 512MB heap cap; default convert limit **100MB**
+- **Worker isolation** — each file conversion runs in a fresh Worker thread whose heap cap and concurrency are env-tunable (`CONVERT_WORKER_HEAP_MB` / `CONVERT_MAX_CONCURRENT`); default convert limit **100MB**. Peak memory = concurrency × heap, and the file is briefly held twice (main process + structured-clone copy)
 - **Cookie auth** — HMAC-SHA256 signed tokens in httpOnly cookies, 30-day TTL
 - **WebSocket rooms** — clients grouped by padId, broadcast scoped per-pad
 - **3-tier access** — public pads (anyone), private pads (owner + invited), admin (everything)
@@ -81,12 +88,32 @@ For small teams / families on a local network who want zero-friction collaborati
 ## Deployment
 
 ```bash
-# Direct
-npm run dev                        # development (tsx watch)
-npm run build && npm start         # production
+# Development
+npm run dev                        # tsx watch
 
-# Docker
-docker compose up -d
+# Production (self-hosted, recommended)
+cp .env.example .env               # set SESSION_SECRET + PUBLIC_ORIGIN
+$EDITOR Caddyfile                  # set your domain
+docker compose up -d --build       # Caddy (TLS) -> app (internal :8000)
+
+# Update / roll back
+./scripts/deploy.sh --pull         # backup, build, restart, health-gate, auto-rollback
+./scripts/backup.sh                # snapshot only
 ```
 
-Data persists in `./data/` (or `DATA_DIR` env var). SQLite migrations run automatically on startup.
+The app publishes **no host port** — Caddy is the sole ingress. Full details,
+resource tuning and troubleshooting: **`docs/DEPLOYMENT.md`**.
+
+Bare metal (no Docker) is also supported via `npm run build && npm start` plus a
+systemd unit; see the runbook.
+
+Data persists in `./data/` (or `DATA_DIR`). In Docker it lives in the
+`notepad-data` volume. SQLite migrations run automatically on startup.
+
+### Health probes
+
+- `GET /api/health` — **liveness only, never touches the database**. Docker
+  restarts the container after repeated failures, so a busy SQLite checkpoint
+  must not fail this probe.
+- `GET /api/health/ready` — readiness: queries SQLite, returns `pads` / `files`
+  counts, 503 if the database is unreachable.

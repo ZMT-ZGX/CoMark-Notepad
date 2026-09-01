@@ -15,6 +15,14 @@ function findAll(): FileInfo[] {
   return db.prepare('SELECT * FROM files ORDER BY created_at DESC').all().map(rowToFile);
 }
 
+// Metadata-only count. Callers that just need a total (health check, pad
+// listing) must use this instead of findAll().length — findAll() materializes
+// every row and maps it through rowToFile.
+function count(): number {
+  const db = sqlite.getDb();
+  return db.prepare('SELECT COUNT(*) AS cnt FROM files').get().cnt;
+}
+
 function create(fileInfo: FileInfo): FileInfo {
   const db = sqlite.getDb();
   db.prepare(
@@ -79,6 +87,7 @@ function rowToFile(row: any): FileInfo {
 module.exports = {
   findById,
   findAll,
+  count,
   create,
   remove,
   removeByPadId,

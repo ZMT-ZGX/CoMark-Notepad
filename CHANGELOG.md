@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] - 2026-09-01
 
 ### 协作手感与带宽 / 内存开销修复
 
@@ -22,9 +22,41 @@ All notable changes to this project are documented in this file. Versions follow
 
 - **FTS trigram 节流重建** — 触发器 `pad_au` 目前每次 patch 都同步全量重建索引。改为「脏标记 + 定时批量重建」需要 `DROP TRIGGER` 迁移（现有库上的 `CREATE TRIGGER IF NOT EXISTS` 不会替换旧触发器），且会引入搜索最终一致，与「写入后立即可搜」的现有测试契约冲突。收益（编辑路径 CPU）暂不抵风险，留待后续单独评估。
 
+### 自托管部署优化
+
+面向「部署到自己的服务器」的改造，形态为 **Docker Compose + Caddy 自动 HTTPS**（应用不直接暴露端口，Caddy 为唯一入口）。完整流程见 `docs/DEPLOYMENT.md`。
+
+### 修复
+
+1. **资源限制此前形同虚设** — `docker-compose.yml` 原用 `deploy.resources.limits`（512M / 1 CPU），该文件自身注释已说明其仅在 Swarm 模式或 `--compatibility` 下生效，标准 `docker compose up` **完全不应用**。改用标准 compose 真正生效的服务级 `mem_limit` / `cpus`。
+2. **转换内存峰值与容器上限冲突（会 OOM）** — `MAX_CONCURRENT_CONVERTS = 3` 与 worker 堆 `512MB` 均为硬编码，峰值 1.5GB，远超 512M 限制，一转换即被 OOM kill。现改为环境变量可配（`CONVERT_MAX_CONCURRENT` / `CONVERT_WORKER_HEAP_MB`，默认值保持 3 / 512 以兼容既有行为），compose 按小机型调优为 2 × 256MB，并给出内存预算公式。
+3. **启动配置告警从未触发** — `PUBLIC_ORIGIN` 有 `http://localhost:<port>` 兜底值，故 `if (isProduction && !PUBLIC_ORIGIN)` 恒为假，该告警是死代码。新增 `productionConfigWarnings()` 直接检查原始 env，并补充四类自托管高频误配告警（http 源导致 Secure Cookie 失效、`TRUST_PROXY_HOPS=0` 导致限流共用桶、`ADMIN_TOKEN` 未设、`SESSION_SECRET` 过短）。**只告警不抛出**：配置错误引发启动循环比配置降级更糟。
+4. **`TRUST_PROXY_HOPS` 两处不一致** — `.env.example` 声明、`app.ts` 直读 `process.env`、而 `config.ts` 未导出。统一由 `config.ts` 解析并导出（`parseNonNegativeInt`，接受 0 = 无反代），`app.ts` 改为引用。
+5. **健康检查全量加载** — `/api/health` 用 `db.pads.findAll()` 仅为取数量，每 30 秒把所有 Pad 正文（每个最多 100KB × 50）读进内存。改用 `COUNT(*)`；并为 `db.files` 补了 `count()`（原只有 `findAll()`）。
+6. **日志敏感信息泄露面** — Pad 解锁 token 走 `X-Pad-Token` 头、会话走 cookie，任何打印请求对象的代码都会把长期凭证写进日志（自托管环境下常与数据目录同盘）。新增 pino `redact`，对 `cookie` / `authorization` / `x-pad-token` / `password` / `token` 脱敏为 `[REDACTED]`。
+
+### 新增
+
+7. **存活 / 就绪探针分离** — `/api/health` 为存活探针，**不碰数据库**（Docker 连续失败会重启容器，不能让繁忙的 SQLite checkpoint 误杀健康进程）；新增 `/api/health/ready` 为就绪探针，查库并返回 `pads` / `files`，库不可用时 503。
+   > ⚠️ **契约变更**：`pads` / `files` 字段从 `/api/health` 移至 `/api/health/ready`。外部监控若读取这两个字段需改指就绪端点。
+8. **访问日志增强** — 原仅记 `method / path / ip`。现改为在响应 `finish` 时记录，补充**状态码与耗时**，按级别分流（4xx warn、5xx error），并跳过健康检查请求（每 30 秒一次，否则刷屏）。
+9. **容器安全加固** — `read_only: true` + `/tmp` tmpfs、`cap_drop: [ALL]`、`no-new-privileges:true`、`init: true`（回收僵尸进程并正确转发 SIGTERM）；应用不再发布宿主机端口。
+10. **日志滚动** — json-file 驱动配 `max-size: 10m` / `max-file: 3`，防止日志无限增长占满磁盘。
+11. **部署与运维脚本** — `scripts/deploy.sh`（备份 → 打回滚标签 → 构建 → 重启 → 等就绪，**失败自动回滚**）、`scripts/backup.sh`（经 SQLite backup API 取一致性快照 + 上传文件归档 + 保留期清理）、`scripts/sqlite-backup.js`。
+    > 备份**不能**用 `cp store.db`：服务运行时库旁有 `store.db-wal`，直接拷贝主文件会拿到半个 checkpoint 的损坏数据。
+12. **`.env.example` 补全** — 补齐 8 个代码已生效但未文档化的变量（`NODE_ENV`、`DATA_DIR`、`LOG_LEVEL`、`MAX_WS_CONNECTIONS`、`MAX_WS_CONNECTIONS_PER_IP`、`WS_PATCH_WINDOW_MS`、`MAX_WS_PATCHES_PER_WINDOW`、`TRUST_PROXY_HOPS`），并按用途分组注释。
+
 ### Test Coverage
 
-- 75/75 测试通过（新增「加锁 Pad 的未认证连接计入每 IP 上限」回归用例，并在既有 patch 广播用例中补「每次编辑只产生一个广播帧」断言）；`tsc --noEmit` 零错误；ESLint 无新增告警
+- **75/75 测试通过**；`tsc --noEmit` 零错误；ESLint 零告警
+- 新增「加锁 Pad 的未认证连接计入每 IP 上限」回归用例；既有 patch 广播用例补「每次编辑只产生一个广播帧」断言
+- 健康检查用例由「只断言 `/api/health`」扩展为**同时校验存活与就绪两个端点**，并保留原有 `pads === 1` 断言（移至就绪端点）后补 `uptime` 与 `files` 断言——属补强而非削弱
+- `scripts/backup.sh` / `scripts/deploy.sh` 通过 bash 语法校验（`bash -n`）、`scripts/sqlite-backup.js` 通过 `node --check`；`docker-compose.yml` 通过 YAML 解析校验
+
+### 未验证项
+
+- 运行环境无 Docker / shellcheck，故以下内容**仅通过静态校验，未经实机运行验证**：`docker-compose.yml` 实际启动、`read_only: true` 与该应用的兼容性、`Caddyfile` 配置、`deploy.sh` / `backup.sh` 的实际执行与回滚路径。
+  首次部署时请先按 `docs/DEPLOYMENT.md` 第 3 节逐步验证；`read_only` 若导致启动失败，文档第 9 节已给出定位与处置方式。
 
 ---
 

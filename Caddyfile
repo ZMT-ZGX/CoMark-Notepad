@@ -1,0 +1,40 @@
+# Reverse proxy and automatic HTTPS for Collab Notepad.
+#
+# Before starting:
+#   1. Replace notepad.example.com below with your domain.
+#   2. Point that domain's DNS A/AAAA record at this server.
+#   3. Make sure ports 80 and 443 are reachable — Caddy needs them for the
+#      ACME HTTP challenge, after which it renews certificates automatically.
+
+notepad.example.com {
+	encode zstd gzip
+
+	# Must be >= CONVERT_MAX_BYTES (default 100MB) or large uploads are
+	# rejected by the proxy before the app ever sees them.
+	request_body {
+		max_size 100MB
+	}
+
+	reverse_proxy comark-notepad:8000 {
+		# Caddy forwards the Upgrade/Connection headers automatically, so
+		# WebSocket sync needs no extra directives. flush_interval -1 disables
+		# response buffering so patches are not held up in the proxy.
+		flush_interval -1
+	}
+
+	header {
+		# Only send HSTS once you are confident HTTPS works; it pins visitors
+		# to https for max-age seconds.
+		Strict-Transport-Security "max-age=31536000;"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Remove the version banner.
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

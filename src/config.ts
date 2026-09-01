@@ -9,6 +9,13 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isInteger(num) && num > 0 ? num : fallback;
 }
 
+// Like parsePositiveInt but accepts 0, which is meaningful for TRUST_PROXY_HOPS
+// (0 = no reverse proxy, trust the socket address directly).
+function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+  const num = value != null ? parseInt(String(value), 10) : NaN;
+  return Number.isInteger(num) && num >= 0 ? num : fallback;
+}
+
 // PORT=0 is valid (ephemeral port), so we use Number() with a NaN guard instead
 // of parsePositiveInt which rejects zero.
 const PORT = Number(process.env.PORT ?? 8000);
@@ -29,6 +36,12 @@ const FILE_TTL_HOURS = parsePositiveInt(process.env.FILE_TTL_HOURS, 72);
 const FILE_TTL_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h
 const CONVERT_MAX_BYTES = parsePositiveInt(process.env.CONVERT_MAX_BYTES, 100 * 1024 * 1024); // 100MB
 const CONVERT_TIMEOUT_MS = parsePositiveInt(process.env.CONVERT_TIMEOUT_MS, 60 * 1000); // 60s
+// Peak conversion memory is CONVERT_MAX_CONCURRENT x CONVERT_WORKER_HEAP_MB and
+// must fit inside the container memory limit next to the main process. Both are
+// env-tunable so a small VPS can trade throughput for headroom instead of being
+// OOM-killed mid-conversion; the defaults preserve the historical behaviour.
+const CONVERT_MAX_CONCURRENT = parsePositiveInt(process.env.CONVERT_MAX_CONCURRENT, 3);
+const CONVERT_WORKER_HEAP_MB = parsePositiveInt(process.env.CONVERT_WORKER_HEAP_MB, 512);
 const MAX_PASSWORD_LENGTH = 1024;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 const MAX_WS_CONNECTIONS = parsePositiveInt(process.env.MAX_WS_CONNECTIONS, 1000);
@@ -39,6 +52,11 @@ const MAX_WS_CONNECTIONS_PER_IP = parsePositiveInt(process.env.MAX_WS_CONNECTION
 // (60/min); WS messages bypass Express, so we enforce an equivalent cap here.
 const WS_PATCH_WINDOW_MS = parsePositiveInt(process.env.WS_PATCH_WINDOW_MS, 60 * 1000);
 const MAX_WS_PATCHES_PER_WINDOW = parsePositiveInt(process.env.MAX_WS_PATCHES_PER_WINDOW, 120);
+// Number of reverse-proxy hops to trust for X-Forwarded-For. Single source of
+// truth for `app.set('trust proxy', ...)`; app.ts must read it from here rather
+// than process.env so a malformed value falls back instead of silently
+// disabling client-IP resolution.
+const TRUST_PROXY_HOPS = parseNonNegativeInt(process.env.TRUST_PROXY_HOPS, 0);
 
 // Supported extensions for Markdown conversion
 const CONVERTIBLE_EXTS = [
@@ -114,6 +132,58 @@ const cookieFlags = isProduction
   ? 'HttpOnly; SameSite=Strict; Path=/; Secure'
   : 'HttpOnly; SameSite=Strict; Path=/';
 
+// Misconfigurations that are survivable but wrong for a self-hosted install.
+// Warn instead of throwing: a boot loop is strictly worse than a degraded
+// posture, and an operator reading the log can act on a warning. Only runs in
+// production so dev and test (which deliberately leave these unset) stay quiet.
+function productionConfigWarnings(): string[] {
+  const warnings: string[] = [];
+  const rawOrigin = process.env.PUBLIC_ORIGIN;
+
+  if (!rawOrigin) {
+    warnings.push(
+      'PUBLIC_ORIGIN is not set. Origin-based CSRF checks will accept any localhost/LAN origin. Set it to your public URL, e.g. https://notepad.example.com'
+    );
+  } else {
+    let origin: URL | null = null;
+    try {
+      origin = new URL(rawOrigin);
+    } catch {
+      warnings.push(
+        `PUBLIC_ORIGIN (${rawOrigin}) is not a valid URL. CSRF origin checks will never match.`
+      );
+    }
+    if (origin) {
+      const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(origin.hostname);
+      if (origin.protocol === 'http:' && !isLoopback) {
+        warnings.push(
+          `PUBLIC_ORIGIN is plain http (${rawOrigin}) but production session cookies are sent with the Secure flag. Browsers will drop the cookie and login will appear to do nothing. Terminate TLS at the reverse proxy and set PUBLIC_ORIGIN to the https URL.`
+        );
+      }
+    }
+  }
+
+  if (TRUST_PROXY_HOPS === 0) {
+    warnings.push(
+      'TRUST_PROXY_HOPS is 0, so client IPs come from the socket address. Behind a reverse proxy every request looks like it comes from the proxy, which collapses the HTTP rate limiter and the per-IP WebSocket cap into a single shared bucket. Set TRUST_PROXY_HOPS=1 when running behind Caddy/Nginx.'
+    );
+  }
+
+  if (!ADMIN_TOKEN) {
+    warnings.push(
+      'ADMIN_TOKEN is not set. Administrative pad management is disabled; set it if you need break-glass admin access.'
+    );
+  }
+
+  if (SESSION_SECRET.length < 32) {
+    warnings.push(
+      'SESSION_SECRET is shorter than 32 characters. Session cookies are HMAC-signed with it; generate one with `openssl rand -hex 32`.'
+    );
+  }
+
+  return warnings;
+}
+
 module.exports = {
   PORT,
   DATA_DIR,
@@ -129,12 +199,15 @@ module.exports = {
   FILE_TTL_CHECK_INTERVAL_MS,
   CONVERT_MAX_BYTES,
   CONVERT_TIMEOUT_MS,
+  CONVERT_MAX_CONCURRENT,
+  CONVERT_WORKER_HEAP_MB,
   MAX_PASSWORD_LENGTH,
   ADMIN_TOKEN,
   MAX_WS_CONNECTIONS,
   MAX_WS_CONNECTIONS_PER_IP,
   WS_PATCH_WINDOW_MS,
   MAX_WS_PATCHES_PER_WINDOW,
+  TRUST_PROXY_HOPS,
   CONVERTIBLE_EXTS,
   CONVERT_FEATURES,
   isProduction,
@@ -142,4 +215,5 @@ module.exports = {
   SESSION_TOKEN_TTL_DAYS,
   PUBLIC_ORIGIN,
   cookieFlags,
+  productionConfigWarnings,
 };

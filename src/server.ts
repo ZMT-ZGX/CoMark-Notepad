@@ -136,11 +136,14 @@ async function start() {
     const padCount = db.pads.findAll().length;
     logger.info(`  Pads:    ${padCount}`);
 
-    const { isProduction, PUBLIC_ORIGIN } = require('./config');
-    if (isProduction && !PUBLIC_ORIGIN) {
-      logger.warn(
-        'PUBLIC_ORIGIN is not set. Origin-based CSRF protection will accept any localhost/LAN origin. Set PUBLIC_ORIGIN in production.'
-      );
+    // NOTE: this reads process.env directly rather than the exported
+    // PUBLIC_ORIGIN, which falls back to http://localhost:<port> and is
+    // therefore always truthy — checking it would make the warning dead code.
+    const { isProduction, productionConfigWarnings } = require('./config');
+    if (isProduction) {
+      for (const warning of productionConfigWarnings()) {
+        logger.warn(warning);
+      }
     }
 
     try {

@@ -1,37 +1,139 @@
+# Self-hosted deployment: Caddy (TLS) -> comark-notepad
+#
+# Quick start:
+#   cp .env.example .env && $EDITOR .env     # set SESSION_SECRET + PUBLIC_ORIGIN
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Resource limits below use the service-level `mem_limit` / `cpus` keys, which
+# `docker compose up` honours directly. The `deploy.resources.limits` block is
+# NOT used: it only takes effect in Swarm mode or with `--compatibility`, so on
+# a single self-hosted box it silently does nothing.
+
 services:
   comark-notepad:
     build: .
+    image: comark-notepad:local
     container_name: comark-notepad
     restart: unless-stopped
 
-    ports:
-      - "${PORT:-8000}:8000"
+    # Reaps orphaned PIDs and forwards SIGTERM correctly. Without this, Node
+    # runs as PID 1 and the conversion worker threads can leave zombies behind.
+    init: true
 
-    volumes:
-      # Persistent data (store.json + uploaded files)
-      - ./data:/app/data
+    # Reachable only on the internal network; Caddy is the sole ingress.
+    # For debugging without exposing the app publicly, uncomment the ports
+    # block — the 127.0.0.1 prefix binds to localhost only.
+    expose:
+      - "8000"
+    # ports:
+    #   - "127.0.0.1:${PORT:-8000}:8000"
+
+    # User-supplied config (SESSION_SECRET, PUBLIC_ORIGIN, ADMIN_TOKEN, ...).
+    # Variables set under `environment` below take precedence over this file.
+    env_file:
+      - .env
 
     environment:
-      # Required in production
-      - SESSION_SECRET=${SESSION_SECRET:?Set SESSION_SECRET in .env (64+ char random string)}
-      # Optional
-      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-}
-      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
-      - SESSION_TOKEN_TTL_DAYS=${SESSION_TOKEN_TTL_DAYS:-30}
-      - FILE_TTL_HOURS=${FILE_TTL_HOURS:-72}
+      NODE_ENV: production
+      PORT: "8000"
+      DATA_DIR: /app/data
+
+      # Cap the main-process heap so Node does not size it from the host's RAM
+      # and get OOM-killed by the cgroup limit. Budget: 384MB main heap +
+      # 2 conversion workers x 256MB = 896MB, leaving headroom inside the
+      # 1536MB limit for the runtime, SQLite and the file being converted
+      # (a converted file is briefly held twice: in the main process and again
+      # as the structured-clone copy handed to the worker thread).
+      NODE_OPTIONS: "--max-old-space-size=384"
+
+      # Tuned down from the code defaults (3 x 512MB = 1.5GB peak, which would
+      # OOM this container). Raise CONVERT_MAX_CONCURRENT only after raising
+      # mem_limit by the same multiple of CONVERT_WORKER_HEAP_MB.
+      CONVERT_MAX_CONCURRENT: "2"
+      CONVERT_WORKER_HEAP_MB: "256"
+
+      # 1 hop = trust X-Forwarded-For from Caddy. Without this every request
+      # looks like it comes from the proxy, collapsing the rate limiter and
+      # the per-IP WebSocket cap into one shared bucket.
+      TRUST_PROXY_HOPS: "1"
+
+    volumes:
+      - notepad-data:/app/data
+
+    # ------------------------------------------------------------------
+    # Resource limits (honoured by plain `docker compose up`)
+    # ------------------------------------------------------------------
+    mem_limit: 1536m
+    cpus: 1.5
+
+    # ------------------------------------------------------------------
+    # Log rotation — without this the default json-file driver grows without
+    # bound and an unrelated traffic spike can fill the disk.
+    # ------------------------------------------------------------------
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # ------------------------------------------------------------------
+    # Container hardening
+    # ------------------------------------------------------------------
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The app only writes inside /app/data (a volume, so still writable) and
+    # /tmp (tmpfs below). If a future change needs another writable path, add
+    # it as a tmpfs rather than removing this flag.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
 
     healthcheck:
+      # Liveness probe: process-level only, never touches SQLite, so a busy
+      # checkpoint cannot fail the check and get a healthy container restarted.
       test: ["CMD", "wget", "-qO-", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 5s
-      start_period: 10s
+      start_period: 20s
       retries: 3
 
-    # NOTE: deploy.resources.limits only applies in Swarm mode or with
-    # `docker compose --compatibility`. For standard compose, use cgroups
-    # via mem_limit/cpus (compose v2) or manage resources externally.
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '1.0'
+    networks:
+      - notepad
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    # 80/443 for HTTP + ACME challenges; 443/udp for HTTP/3.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - notepad
+
+volumes:
+  # SQLite database, uploaded files and legacy store.json live here.
+  # Back this up — `docker compose down -v` deletes it.
+  notepad-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  notepad:

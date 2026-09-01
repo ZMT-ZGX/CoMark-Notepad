@@ -68,22 +68,31 @@ npm run dev
 
 ### 生产部署
 
-```bash
-# 直接
-SESSION_SECRET=<64+字符随机密钥> \
-PUBLIC_ORIGIN=https://yourdomain.com \
-ADMIN_TOKEN=<管理员令牌> \
-NODE_ENV=production \
-npm run build && npm start
+推荐方式：**Docker Compose + Caddy 自动 HTTPS**（应用不直接暴露端口，Caddy 是唯一入口）。
 
-# Docker
+```bash
 cp .env.example .env
-# 编辑 .env 填入 SESSION_SECRET (openssl rand -hex 32)
-docker compose up -d
+# 必填：SESSION_SECRET (openssl rand -hex 32) 与 PUBLIC_ORIGIN (https://yourdomain.com)
+chmod 600 .env
+# 把 Caddyfile 里的 notepad.example.com 换成你的域名
+$EDITOR Caddyfile
+
+docker compose up -d --build
 docker compose logs -f
 ```
 
-数据持久化在 `./data` 目录（SQLite 数据库 + 上传文件）。
+后续更新与回滚：
+
+```bash
+./scripts/deploy.sh --pull     # 备份 → 构建 → 重启 → 等健康检查，失败自动回滚
+./scripts/backup.sh            # 单独备份（SQLite 快照 + 上传文件归档）
+```
+
+完整流程（备份恢复、资源调优、安全加固、故障排查、非 Docker 的 systemd 部署）
+见 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**。
+
+数据持久化在 `./data` 目录（SQLite 数据库 + 上传文件）；Docker 部署时位于
+`notepad-data` 卷中。
 
 ## 环境变量
 
@@ -244,8 +253,11 @@ collab-notepad/
 │   ├── smoke.test.js
 │   ├── convert.test.js
 │   └── e2e/               # Playwright E2E
+├── scripts/               # 运维：deploy.sh（构建+健康检查+回滚）· backup.sh · sqlite-backup.js
+├── docs/                  # DEPLOYMENT.md（自托管运维手册）· 设计文档
 ├── Dockerfile             # 多阶段生产镜像
-├── docker-compose.yml
+├── docker-compose.yml     # Compose + Caddy；服务级 mem_limit / cpus
+├── Caddyfile              # 反向代理 + 自动 HTTPS
 ├── .env.example
 └── data/                  # 运行时自动生成
 ```
@@ -299,13 +311,29 @@ collab-notepad/
 - 背景与多人部署的安全权衡见上方「访问控制模型」¹ 注释
 - 其他修复：**上传大文件永久卡死**（`req.destroyed` 误判中断，改用 `!req.complete`）、**PDF 转 Markdown 全部失败**（pdf-parse v2 `PDFParse` 类迁移）、IPv6 私网识别补全、`SESSION_SECRET` 开发期持久化（`0600`）、`isPublicPad` 去重、粘贴上传文件/截图、hotkeys-js 容错、限流范围收窄、CSP 重新允许 cdn.jsdelivr.net（SRI）
 
-### Unreleased（安全加固）
+### v1.1.3 (2026-07-12)
+
+**安全加固（Pad unlock / 搜索 / 转换）**
 
 - **搜索 XSS** — FTS snippet 改用 `U+E000/E001` 定界，客户端 escape 后再还原 `<mark>`
 - **Unlock token 仅 header** — 下载/上传/搜索/state/改密不再接受 `?padToken=`；多 token 逗号分隔
 - **加锁门禁** — 搜索与 state 文件列表对未解锁 Pad 隐藏内容；解锁后自动 `refreshPads`
 - **WS 写复检锁** — 每次 patch 校验 `ws.unlockToken`，失效 `4403`
 - **转换上限 100MB** — `CONVERT_MAX_BYTES` 默认与上传对齐
+
+### v1.2.0 (2026-09-01)
+
+**自托管部署优化 + 协作手感与开销修复**
+
+- **自托管部署方案** — Docker Compose + **Caddy 自动 HTTPS**（应用不直接暴露端口，Caddy 为唯一入口）；配套 `scripts/deploy.sh`（失败自动回滚）、`scripts/backup.sh`（SQLite 一致性快照）与运维手册 `docs/DEPLOYMENT.md`
+- **资源限制此前形同虚设** — `deploy.resources.limits` 仅在 Swarm / `--compatibility` 生效，标准 `docker compose up` **完全不应用**；改用服务级 `mem_limit` / `cpus`
+- **转换内存不再 OOM** — 转换并发与 worker 堆由硬编码改为可配（`CONVERT_MAX_CONCURRENT` / `CONVERT_WORKER_HEAP_MB`），原 3×512MB = 1.5GB 峰值远超容器上限
+- **启动配置自检** — 新增生产环境误配告警（http 源导致 Secure Cookie 失效、`TRUST_PROXY_HOPS=0` 导致限流共用桶、`SESSION_SECRET` 过短等）；并修复原 `PUBLIC_ORIGIN` 告警因默认值兜底而**恒不触发**的问题
+- **协作手感** — 新增 `mapCaret()` 光标映射，远端编辑不再把光标弹到文末；IME 组合态期间不写入编辑器，中文输入不再被远端编辑打断
+- **开销优化** — 每次编辑的广播从两份全文档降为一份；元数据查询不再读取正文；健康检查改用 `COUNT(*)`（原每 30 秒全量加载所有 Pad 正文）
+- **日志增强** — 访问日志补状态码与耗时；`cookie` / `authorization` / `x-pad-token` 等敏感头自动脱敏
+
+> ⚠️ **契约变更**：`/api/health` 的 `pads` / `files` 字段移至新增的 `/api/health/ready`。存活探针不再查库（避免繁忙的 SQLite checkpoint 导致容器被误重启），就绪探针查库并在数据库不可用时返回 503。外部监控若读取这两个字段需改指就绪端点。
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 

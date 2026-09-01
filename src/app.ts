@@ -4,7 +4,7 @@ const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-const { JSON_BODY_LIMIT } = require('./config');
+const { JSON_BODY_LIMIT, TRUST_PROXY_HOPS } = require('./config');
 const { authenticate } = require('./middlewares/auth');
 const { extractPadTokens, hasValidUnlockToken } = require('./middlewares/security');
 const errorHandler = require('./middlewares/errorHandler');
@@ -17,7 +17,7 @@ function createApp(
   getPadClients: (padId: number) => Set<any> | undefined
 ) {
   const app = express();
-  app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 0));
+  app.set('trust proxy', TRUST_PROXY_HOPS);
   app.disable('x-powered-by');
 
   // Security headers (relaxed CSP for inline SVG favicon)
@@ -44,10 +44,27 @@ function createApp(
     })
   );
 
-  // Request logging
-  app.use((req: any, _res: any, next: any) => {
-    const ip = req.ip || req.socket.remoteAddress;
-    logger.info(`${req.method} ${req.path} [${ip}]`);
+  // Access log. Registered on 'finish' rather than on the request so the entry
+  // can carry the status code and duration, which are unknown at request time.
+  // Health probes are skipped: Docker and Caddy poll them every few seconds and
+  // they would otherwise drown out real traffic in the log stream.
+  const ACCESS_LOG_SKIP_PATHS = new Set(['/api/health', '/api/health/ready']);
+  app.use((req: any, res: any, next: any) => {
+    if (ACCESS_LOG_SKIP_PATHS.has(req.path)) return next();
+    const startedAt = process.hrtime.bigint();
+    res.on('finish', () => {
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      const meta = {
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        durationMs: Math.round(durationMs * 10) / 10,
+        ip: req.ip || req.socket.remoteAddress,
+      };
+      if (res.statusCode >= 500) logger.error(meta, 'request failed');
+      else if (res.statusCode >= 400) logger.warn(meta, 'request rejected');
+      else logger.info(meta, 'request completed');
+    });
     next();
   });
 

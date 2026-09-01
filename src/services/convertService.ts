@@ -18,12 +18,14 @@ const { canAccessFile: authCanAccessFile } = require('../utils/auth');
 const {
   CONVERT_MAX_BYTES,
   CONVERT_TIMEOUT_MS,
+  CONVERT_MAX_CONCURRENT,
+  CONVERT_WORKER_HEAP_MB,
   CONVERTIBLE_EXTS,
   CONVERT_FEATURES,
 } = require('../config');
 const logger = require('../utils/logger');
 
-const MAX_CONCURRENT_CONVERTS = 3;
+const MAX_CONCURRENT_CONVERTS = CONVERT_MAX_CONCURRENT;
 
 class ConvertService {
   store: DataStore;
@@ -164,7 +166,7 @@ class ConvertService {
     return new Promise((resolve, reject) => {
       const worker = new Worker(path.join(__dirname, '../../convert-worker.js'), {
         workerData: { buffer, ext, mimeType, originalName },
-        resourceLimits: { maxOldGenerationSizeMb: 512 },
+        resourceLimits: { maxOldGenerationSizeMb: CONVERT_WORKER_HEAP_MB },
       });
       let settled = false;
       const timer = setTimeout(() => {

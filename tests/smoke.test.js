@@ -178,13 +178,24 @@ test('state endpoint returns default shape with one pad', async () => {
   }
 });
 
-test('health endpoint returns status', async () => {
+test('health endpoints expose liveness and readiness', async () => {
   const server = await startServer();
   try {
-    const { response, body } = await fetchJson(server.baseUrl, '/api/health');
-    assert.equal(response.status, 200);
-    assert.equal(body.status, 'ok');
-    assert.equal(body.pads, 1);
+    // Liveness: the process is up. Intentionally does NOT touch the database —
+    // Docker restarts the container after repeated failures, so a healthy
+    // process blocked on a SQLite checkpoint must not be killed for it.
+    const liveness = await fetchJson(server.baseUrl, '/api/health');
+    assert.equal(liveness.response.status, 200);
+    assert.equal(liveness.body.status, 'ok');
+    assert.equal(typeof liveness.body.uptime, 'number');
+
+    // Readiness: the database is reachable and serving. Counts moved here from
+    // /api/health because they require a query.
+    const readiness = await fetchJson(server.baseUrl, '/api/health/ready');
+    assert.equal(readiness.response.status, 200);
+    assert.equal(readiness.body.status, 'ok');
+    assert.equal(readiness.body.pads, 1);
+    assert.equal(readiness.body.files, 0);
   } finally {
     await stopServer(server);
   }
