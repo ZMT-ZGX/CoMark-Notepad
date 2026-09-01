@@ -34,16 +34,37 @@ function initWSS(
   const wss = new WebSocketServer({ server, maxPayload: JSON_BODY_LIMIT });
 
   wss.on('connection', (ws: CoMarkWebSocket, req: any) => {
-    // Hard connection ceiling to protect memory and heartbeat CPU
-    if (connections.getTotalCount() >= MAX_WS_CONNECTIONS) {
+    // Note: req.ip is an Express property — unavailable on raw upgrade req.
+    const clientIp = req.socket.remoteAddress;
+
+    // Count this socket BEFORE anything that can await. A password-protected
+    // pad waits up to 1.5s for its `auth` message, and only then does the
+    // connection reach connections.add(); without counting it here, neither
+    // ceiling below can see it and an attacker can stack unlimited pending
+    // sockets against a locked pad. Released on close, or converted into a
+    // real connection by finalizeConnection().
+    connections.reserve(clientIp);
+    let reserved = true;
+    const releaseReservation = () => {
+      if (!reserved) return;
+      reserved = false;
+      connections.releaseReservation(clientIp);
+    };
+    ws.once('close', releaseReservation);
+
+    // Hard connection ceiling to protect memory and heartbeat CPU.
+    // The socket is already reserved above, so this counts itself — hence
+    // `>` rather than `>=` to keep the original "at most MAX live" semantics.
+    if (connections.getTotalCount() + connections.getPendingTotal() > MAX_WS_CONNECTIONS) {
       ws.close(1013, 'Server overloaded');
       return;
     }
 
     // Per-IP connection limit to prevent single-IP pool exhaustion
-    // Note: req.ip is an Express property — unavailable on raw upgrade req.
-    const clientIp = req.socket.remoteAddress;
-    if (connections.getIpCount(clientIp) >= MAX_WS_CONNECTIONS_PER_IP) {
+    if (
+      connections.getIpCount(clientIp) + connections.getPendingIpCount(clientIp) >
+      MAX_WS_CONNECTIONS_PER_IP
+    ) {
       ws.close(1013, 'Connection limit reached for this IP');
       return;
     }
@@ -102,6 +123,9 @@ function initWSS(
       // of each 60s interval). See message handler below.
       ws.patchWindowStart = Date.now();
       ws.patchCount = 0;
+      // Handshake done: this socket stops being "pending" and becomes a real,
+      // counted connection.
+      releaseReservation();
       connections.add(ws, { clientId: ws.clientId, padId, userId: ws.userId, ipAddress: clientIp });
 
       ws.on('pong', () => {

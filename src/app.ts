@@ -111,10 +111,12 @@ function createApp(
       const { padService } = services;
       const unlockTokens = extractPadTokens(req);
       const rows = db.searchPads(tokens);
-      // Use full pad from DB so invitation-grant check in canAccessPad works correctly.
+      // Pad metadata (owner / creator / password) is enough for the
+      // invitation-grant check in canAccessPad — loading the full row would
+      // pull every matching pad body into memory just to gate a snippet.
       const results = rows
         .map((r: any) => {
-          const pad = db.pads.findById(r.id);
+          const pad = db.pads.findByIdMeta(r.id);
           if (!pad || !padService.canAccessPad(req.userId, pad)) return null;
           // Password-protected pads: their body must not leak through search
           // unless the requester has unlocked THIS pad for THIS request. A

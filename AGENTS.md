@@ -103,8 +103,9 @@ npm run test:e2e                  # Playwright (requires build first)
 - **CSRF**: Origin header validation with private IP bypass for LAN clients
 - **Pad access**: 3-tier — public (`ownerUserId=null`), private (owner+invited), legacy (admin-only)
 - **Pad unlock tokens**: bearer tokens for password-protected pads; **header only** (`X-Pad-Token`, comma-separated multi-token OK). Never put unlock tokens in query strings (access/proxy logs). Shared helpers: `extractPadTokens` / `hasValidUnlockToken` in `middlewares/security.ts`; client: `padAuthHeaders()` in `public/js/core.js`
-- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10); locked pads auth via first message `{ type: 'auth', padToken }`; every `applyPatch` re-validates `ws.unlockToken` (close **4403** if invalid)
-- **Patch sync**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; pad-scoped offline queue in localStorage
+- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10); locked pads auth via first message `{ type: 'auth', padToken }`; every `applyPatch` re-validates `ws.unlockToken` (close **4403** if invalid). Sockets are counted from the `connection` event (pending) through `finalizeConnection` (live) so the 1.5s auth window can't be used to stack invisible connections
+- **Patch sync**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; pad-scoped offline queue in localStorage. **One broadcast frame per edit** — `applyPatch` sends only `patch` (which carries both the diff and the authoritative body); a second `text-update` snapshot is pure waste because the client's `version <= textVersion` guard drops it
+- **Editor writes**: always go through `setEditorText()` in `text-sync.js` so the caret is mapped across the diff; never assign `textarea.value` while an IME composition is active (see below)
 - **File conversion**: in-worker with 512MB heap limit, 60s timeout, max 3 concurrent; default **100MB** (`CONVERT_MAX_BYTES`)
 - **FTS5 search**: `pad_search` virtual table (trigram) + 3 triggers; `/api/search` with access filtering + unlock gating; snippet delimiters are private-use `U+E000`/`U+E001` (client escapes then restores `<mark>`) — never raw HTML from FTS
 - **WAL + busy_timeout=5000**: SQLite concurrency hardening
@@ -122,6 +123,9 @@ npm run test:e2e                  # Playwright (requires build first)
 - Do NOT accept pad unlock tokens from query strings (`?padToken=`) — header only
 - Do NOT render FTS snippets as HTML without escaping; do NOT reintroduce literal `<mark>` delimiters from SQLite `snippet()`
 - Do NOT add offline queue entries with a global key — namespace by `padId`
+- Do NOT grow the offline queue beyond one entry per pad — coalesce shadow → latest text (a per-keystroke chain blows the ~5MB localStorage quota and silently loses edits)
+- Do NOT assign `textarea.value` directly or send patches while an IME composition is active — use `setEditorText()` and let `endComposition()` reconcile
+- Do NOT re-add a second broadcast in `applyPatch` (e.g. `text-update` alongside `patch`) — it doubles outbound body for zero client benefit
 - Do NOT modify `state` object outside `public/js/core.js` modules
 - Do NOT commit secrets, `.env` files, or API keys
 

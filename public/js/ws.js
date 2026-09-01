@@ -102,7 +102,8 @@ export function connectWS() {
         break;
       case 'patch-ack':
         if (typeof msg.seq === 'number') ackInflight(msg.seq, state.currentPadId, msg.text, msg.textVersion);
-        if (msg.textVersion) {
+        // Version 0 is a legitimate value — a truthiness test would skip it.
+        if (typeof msg.textVersion === 'number') {
           const sync = getPadSync(state.currentPadId);
           sync.textVersion = Math.max(sync.textVersion, msg.textVersion);
         }

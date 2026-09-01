@@ -230,7 +230,7 @@ class FileService {
       if (finished || aborted) return;
 
       // Resolve file ownership and pad association
-      const targetPadId = padIdField || this.store.findAllPads()[0]?.id || 1;
+      const targetPadId = padIdField || this.store.findAllPadMeta()[0]?.id || 1;
       const targetPad = this.store.findPadById(targetPadId);
       if (!targetPad) return fail(404, 'Pad not found');
 

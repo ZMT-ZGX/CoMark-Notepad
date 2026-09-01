@@ -933,6 +933,18 @@ test('patch messages sync between clients on the same pad', async () => {
     const remote = await waitForMessage(b, (msg) => msg.type === 'patch', 1500);
     assert.equal(remote.padId, 1);
     assert.equal(remote.data, patchText);
+    assert.equal(remote.text, 'Hello World', 'patch frame must carry the authoritative body');
+
+    // Exactly ONE broadcast frame per edit. A second `text-update` snapshot
+    // used to double the outbound body on every keystroke, and the client
+    // dropped it regardless: the patch frame already advances its version to
+    // the same value, so the snapshot failed the `version <= textVersion` guard.
+    await delay(100);
+    assert.equal(
+      b.messages.filter((msg) => msg.type === 'patch' || msg.type === 'text-update').length,
+      0,
+      'each edit must produce a single broadcast frame, not a patch plus a duplicate snapshot'
+    );
 
     // Server text should reflect the change
     const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
@@ -1059,6 +1071,78 @@ test('WS patch rate limit closes connection with code 4001', async () => {
     assert.equal(closeEvent.code, 4001, `Expected close code 4001, got ${closeEvent.code}`);
 
     await closeClient(a);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('unauthenticated connections to a locked pad count toward the per-IP limit', async () => {
+  const server = await startServer({
+    ADMIN_TOKEN: 'admin123',
+    MAX_WS_CONNECTIONS_PER_IP: '3',
+  });
+  try {
+    const setPassword = await fetchJson(server.baseUrl, '/api/pads/1/password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': 'admin123',
+        Origin: server.baseUrl,
+      },
+      body: JSON.stringify({ password: 'secret123' }),
+    });
+    assert.equal(setPassword.response.status, 200);
+    assert.equal(setPassword.body.hasPassword, true);
+    // Sanity check: the pad really is locked, otherwise every socket below
+    // would finalize immediately and never test the pending path.
+    const locked = await fetchJson(server.baseUrl, '/api/pads/1');
+    assert.equal(locked.response.status, 403);
+
+    // A password-protected pad holds each socket in a "pending" state until it
+    // receives an `auth` message (up to 1.5s), so none of these reach
+    // connections.add(). They must still be counted: otherwise a client can
+    // stack an unlimited number of pending sockets and exhaust server memory
+    // while neither the global nor the per-IP ceiling ever sees them.
+    // Note the sockets are judged by whether the server closes them, not by
+    // the client's `open` event: the client fires `open` as soon as the
+    // handshake completes, which is before the server's close frame can
+    // arrive. The 500ms window sits well inside the 1.5s auth timeout, so an
+    // admitted socket is still open while a rejected one has already closed.
+    const sockets = [];
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        new Promise((resolve) => {
+          const socket = new WebSocket(`${server.wsUrl}/?pad=1`);
+          sockets.push(socket);
+          let settled = false;
+          const done = (outcome) => {
+            if (settled) return;
+            settled = true;
+            resolve(outcome);
+          };
+          socket.once('close', (code) => done(code));
+          socket.once('error', () => done('error'));
+          setTimeout(() => done('admitted'), 500);
+        })
+      )
+    );
+
+    assert.equal(
+      results.filter((r) => r === 'admitted').length,
+      3,
+      `expected 3 pending sockets to be admitted, got ${JSON.stringify(results)}`
+    );
+    assert.equal(
+      results.filter((r) => r === 1013).length,
+      1,
+      `expected the 4th socket to be rejected with 1013, got ${JSON.stringify(results)}`
+    );
+
+    for (const socket of sockets) {
+      try {
+        socket.close();
+      } catch {}
+    }
   } finally {
     await stopServer(server);
   }

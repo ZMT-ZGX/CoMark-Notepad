@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### 协作手感与带宽 / 内存开销修复
+
+1. **远端编辑不再把光标弹到文末** — `text-sync.js` 此前在应用远端权威正文时只 `ta.value = text`，浏览器会把 textarea 光标重置到末尾，对端每敲一个字本地光标就跳走。新增 `mapCaret()`：走一遍 diff，按「光标之前删除则回退、之前插入则前移」把旧偏移映射到新正文，并用 `setEditorText()` 统一所有写入点（`applyTextState` / `applyLoadedText` / `applyRemotePatch` / `ackInflight` / `mergeAndResync`）。patch 分支原有的 `setSelectionRange` 也从「按新长度截断」改为真正的偏移映射。
+2. **远端编辑不再打断中文输入法** — 组合态期间（`compositionstart` → `compositionend`）绝不写 `textarea.value`，否则 IME 组合缓冲被销毁、正在拼的字丢失。远端正文暂存为 `pendingRemoteState(force)`，在 `compositionend` 提交后连同本地已提交文本一起 rebase。同时组合态期间**暂停发送**：此时发出的 patch 基于已过期的版本号必然被 nack，而其 HTTP 重试会覆盖掉刚收到的远端编辑。blur 作为 `compositionend` 未触发时的兜底。
+3. **离线队列不再撑爆 localStorage 并静默丢数据** — 原实现每个 300ms 防抖周期追加一条、每条各存一份全量 `sentText`，50KB 文档断网两分钟即可产生约 20MB，远超 ~5MB 配额；`setItem` 抛错被 `catch {}` 吞掉，编辑静默丢失而「待同步」横幅仍显示。队列改为**塌缩成单条**（始终从已确认 shadow 直接 diff 到最新正文，与原来的链式队列等价但极小）；`state.setPatchQueue` 在配额失败时降级为只保留最新一条并 toast 提示，不再静默。
+4. **每次编辑的广播从两份全文档降为一份** — `padService.applyPatch` 原来同时广播 `patch`（已含全量 `text`）和 `text-update`（又一份全量快照）。后者 100% 被客户端丢弃：`patch` 已把本地版本推到 N，快照的 `version <= textVersion` 守卫直接返回。删除重复广播，出向带宽与 JSON 序列化 CPU 减半；`patch` 帧保留 `data`（diff 很小）作为无权威正文时的兜底。
+5. **元数据查询不再读取正文** — 新增 `db/pads.ts` 的 `findByIdMeta` / `findAllMeta` / `count` 与 store 的 `findAllPadMeta` / `countPads`。`/api/state`（每次 `pad-created` / `pad-updated` / `pad-deleted` 广播都会让所有客户端重打）与搜索鉴权原先 `SELECT *`，把每个 Pad 的最多 100KB 正文读进内存只为取几个字段。
+6. **搜索路由减少查询与编译** — 每条结果由 `pads.findById`（整行）改为 `findByIdMeta`；`searchSnippet` 的两条 SQL 改为按数据库句柄缓存的 prepared statement（原先每条结果编译一次，20 条即 20 次）。
+7. **`updateText` 不再回读整行** — 改用 `RETURNING text_version, <meta>`，只取标量列；调用方本来就持有刚写入的正文。
+8. **堵住加锁 Pad 的连接数缺口（安全）** — 加锁 Pad 的 socket 要等首条 `auth` 消息（最长 1.5s）才进入 `connections.add()`，在此之前 `MAX_WS_CONNECTIONS` 与 `MAX_WS_CONNECTIONS_PER_IP` 都看不到它，可被无限堆叠。现在 `connection` 事件一开始就登记 pending 计数（全局 + 按 IP），`finalizeConnection` 时升级为正式连接，`close` 时统一释放；pending 连接不进 `padClients`，不会被广播 / 心跳扫到。
+9. **`patch-ack` 版本号改用 `typeof === 'number'`** — 原先 `if (msg.textVersion)` 在版本为 0 时不生效。
+10. **`state.padSync` 不再无限增长** — `seenOperations` 每 Pad 上限 1 万条；现在按 LRU 保留最近 5 个 Pad 的去重缓存（其余 Pad 的 shadow / 版本 / in-flight 状态保留，离线 diff 仍依赖它）。
+11. **切回前台强制重同步** — 新增 `visibilitychange` 监听：页面重新可见且无待发送编辑时主动 `loadPadContent()`，修复移动端切后台再回来后持陈旧正文继续 diff 的问题。
+
+### 有意不做的一项
+
+- **FTS trigram 节流重建** — 触发器 `pad_au` 目前每次 patch 都同步全量重建索引。改为「脏标记 + 定时批量重建」需要 `DROP TRIGGER` 迁移（现有库上的 `CREATE TRIGGER IF NOT EXISTS` 不会替换旧触发器），且会引入搜索最终一致，与「写入后立即可搜」的现有测试契约冲突。收益（编辑路径 CPU）暂不抵风险，留待后续单独评估。
+
+### Test Coverage
+
+- 75/75 测试通过（新增「加锁 Pad 的未认证连接计入每 IP 上限」回归用例，并在既有 patch 广播用例中补「每次编辑只产生一个广播帧」断言）；`tsc --noEmit` 零错误；ESLint 无新增告警
+
+---
+
 ## [1.1.3] - 2026-07-12
 
 ### Security Hardening（Pad unlock / 搜索 / 转换）

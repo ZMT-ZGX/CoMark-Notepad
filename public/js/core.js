@@ -15,6 +15,22 @@
 //                    request/response matching, so a stale response from a
 //                    previous pad can never be applied to the new one.
 //   pendingRemoteState : remote text deferred while the editor is focused.
+//
+// `seenOperations` grows to 10k entries per pad, so pads are kept on a small
+// LRU: the least recently used ones have their dedupe cache dropped, while
+// their shadow / version / in-flight state must survive because offline diffs
+// for a background pad are still computed against that shadow.
+const PAD_SYNC_LRU_LIMIT = 5;
+const padSyncOrder = [];
+
+function prunePadSyncCaches() {
+  while (padSyncOrder.length > PAD_SYNC_LRU_LIMIT) {
+    const stale = padSyncOrder.shift();
+    const sync = state.padSync[stale];
+    if (sync) sync.seenOperations.clear();
+  }
+}
+
 export function getPadSync(padId) {
   if (!state.padSync[padId]) {
     state.padSync[padId] = {
@@ -27,6 +43,10 @@ export function getPadSync(padId) {
       seenOperations: new Set(),
     };
   }
+  const at = padSyncOrder.indexOf(padId);
+  if (at !== -1) padSyncOrder.splice(at, 1);
+  padSyncOrder.push(padId);
+  prunePadSyncCaches();
   return state.padSync[padId];
 }
 
@@ -51,8 +71,23 @@ export const state = {
   getPatchQueue(padId = this.currentPadId) {
     try { return JSON.parse(localStorage.getItem(this.patchQueueKey(padId)) || '[]'); } catch { return []; }
   },
+  // A failed write must be visible: silently dropping the queue lost the
+  // user's offline edits while the banner still promised they were pending.
   setPatchQueue(q, padId = this.currentPadId) {
-    try { localStorage.setItem(this.patchQueueKey(padId), JSON.stringify(q)); } catch {}
+    const key = this.patchQueueKey(padId);
+    try {
+      localStorage.setItem(key, JSON.stringify(q));
+    } catch {
+      try {
+        // Quota exceeded — keep at least the newest entry so the latest edits
+        // still make it out once the connection is back.
+        localStorage.setItem(key, JSON.stringify(q.slice(-1)));
+        showToast('Offline queue too large - keeping only your latest change');
+      } catch {
+        try { localStorage.removeItem(key); } catch {}
+        showToast('Local storage is full - offline changes may be lost');
+      }
+    }
   },
   convertCapabilities: {
     maxBytes: 100 * 1024 * 1024,

@@ -5,6 +5,37 @@ import type { CoMarkWebSocket } from '../types';
 const padClients = new Map<number, Set<CoMarkWebSocket>>(); // padId -> Set<ws>
 const wsConnectionsPerIp = new Map<string, number>(); // tracks active WS connections per IP
 
+// Sockets that completed the TCP/WebSocket upgrade but are not yet registered
+// as real connections (they are waiting for the `auth` first message required
+// by password-protected pads). A connection is only counted by `add()` once
+// that handshake finishes, so without tracking these separately the global and
+// per-IP ceilings cannot see them — an attacker could open an unbounded number
+// of pending sockets against a locked pad and exhaust memory while neither
+// limit ever trips.
+const pendingPerIp = new Map<string, number>();
+let pendingTotal = 0;
+
+function reserve(ipAddress: string): void {
+  pendingTotal += 1;
+  if (ipAddress) pendingPerIp.set(ipAddress, (pendingPerIp.get(ipAddress) || 0) + 1);
+}
+
+function releaseReservation(ipAddress: string): void {
+  if (pendingTotal > 0) pendingTotal -= 1;
+  if (!ipAddress) return;
+  const count = pendingPerIp.get(ipAddress) || 0;
+  if (count <= 1) pendingPerIp.delete(ipAddress);
+  else pendingPerIp.set(ipAddress, count - 1);
+}
+
+function getPendingTotal(): number {
+  return pendingTotal;
+}
+
+function getPendingIpCount(ip: string): number {
+  return pendingPerIp.get(ip) || 0;
+}
+
 function add(
   ws: CoMarkWebSocket,
   meta: { clientId: string; padId: number; userId: string | null; ipAddress: string }
@@ -64,8 +95,12 @@ function getPadClients(padId: number): Set<CoMarkWebSocket> | undefined {
 module.exports = {
   add,
   remove,
+  reserve,
+  releaseReservation,
   getTotalCount,
   getIpCount,
+  getPendingTotal,
+  getPendingIpCount,
   getPadCount,
   forEach,
   getPadClients,

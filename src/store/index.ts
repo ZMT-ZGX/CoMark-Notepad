@@ -10,7 +10,7 @@
  *
  * ── Interface ────────────────────────────────────────────────────────
  *  Pad:          findPadById · createPad · updatePadText · updatePadPassword
- *                removePad · findAllPads · padExists
+ *                removePad · findAllPads · findAllPadMeta · countPads · padExists
  *  File:         findFileById · findAllFiles · createFile · removeFile
  *                removeFilesByPadId · removeFilesMany · removeExpiredFiles
  *  User:         userExists · createUser
@@ -36,6 +36,15 @@ function createDataStore(db: any): DataStore {
 
     findAllPads() {
       return db.pads.findAll();
+    },
+
+    // Metadata only (no `text`) — for listing and permission decisions.
+    findAllPadMeta() {
+      return db.pads.findAllMeta();
+    },
+
+    countPads() {
+      return db.pads.count();
     },
 
     padExists(id: number) {

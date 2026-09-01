@@ -90,7 +90,7 @@ class InviteService {
   }
 
   closeRevokedClients(ownerUserId: string | null) {
-    const pads = this.store.findAllPads().filter((pad) => pad.ownerUserId === ownerUserId);
+    const pads = this.store.findAllPadMeta().filter((pad) => pad.ownerUserId === ownerUserId);
     for (const pad of pads) {
       const clients = this.getPadClients ? this.getPadClients(pad.id) : undefined;
       if (!clients) continue;

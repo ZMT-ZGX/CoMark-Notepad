@@ -115,7 +115,10 @@ class PadService {
 
   async getState(userId: string | null, unlockTokens: string[] = []) {
     const hasGrantFn = this.store.hasAccessGrant.bind(this.store);
-    const pads = this.store.findAllPads();
+    // Metadata only: rendering the sidebar needs ownership, not document
+    // bodies, and every pad-created/updated/deleted broadcast makes every
+    // connected client re-request this endpoint.
+    const pads = this.store.findAllPadMeta();
     const files = this.store.findAllFiles();
     const accessiblePads = pads.filter((p) => canAccessPad(userId, p, hasGrantFn));
     // Password-protected pads: hide file metadata until the pad is unlocked
@@ -232,6 +235,14 @@ class PadService {
       }
     }
 
+    // One frame per edit, not two. The `patch` frame already carries the
+    // authoritative body (`text`) alongside the diff, so a separate
+    // `text-update` frame duplicated the whole document on every keystroke —
+    // and the client discarded it anyway: `patch` advances the local version to
+    // N, so the follow-up snapshot at version N was dropped by the
+    // `version <= sync.textVersion` guard in applyRemoteText.
+    // The diff is kept because it is tiny for ordinary typing and is the
+    // client's fallback when a frame arrives without an authoritative body.
     this.broadcast.toPad(
       padId,
       {
@@ -243,14 +254,6 @@ class PadService {
         senderId: excludeWsId || null,
         operationId: operationId || undefined,
       },
-      excludeWsId
-    );
-    // Also publish the authoritative body. A client may receive concurrent
-    // patch frames out of version order; the full snapshot lets it converge
-    // without relying on every peer sharing the same patch base.
-    this.broadcast.toPad(
-      padId,
-      { type: 'text-update', padId, text: updated.text, textVersion: updated.textVersion },
       excludeWsId
     );
     return { ok: true, pad: updated };
@@ -292,8 +295,7 @@ class PadService {
   }
 
   async createPad(userId: string | null) {
-    const pads = this.store.findAllPads();
-    if (pads.length >= MAX_PADS) {
+    if (this.store.countPads() >= MAX_PADS) {
       throw BadRequestError(`Maximum ${MAX_PADS} pads reached`);
     }
     const pad = this.store.createPad({
@@ -367,8 +369,7 @@ class PadService {
       throw ForbiddenError('Access denied');
     }
 
-    const pads = this.store.findAllPads();
-    if (pads.length <= 1) throw BadRequestError('Cannot delete the last pad');
+    if (this.store.countPads() <= 1) throw BadRequestError('Cannot delete the last pad');
 
     for (const [token, entry] of this.unlockTokens) {
       if (entry.padId === padId) this.unlockTokens.delete(token);

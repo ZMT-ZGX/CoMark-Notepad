@@ -227,6 +227,9 @@ export interface DataStore {
   // Pad
   findPadById(id: number): Pad | undefined;
   findAllPads(): Pad[];
+  // Metadata only — omits `text` / `textVersion`, for listing and permissions.
+  findAllPadMeta(): Pad[];
+  countPads(): number;
   padExists(id: number): boolean;
   createPad(pad: Partial<Pad> & { ownerUserId?: string | null; creatorCode?: string | null }): Pad;
   updatePadText(id: number, text: string): Pad | null;
