@@ -14,6 +14,8 @@ import { refreshPads, loadPadContent } from './pads.js';
 import { addFileToList, removeFileFromList, updateFilesEmpty } from './files.js';
 import { showUnlockModal } from './modals.js';
 import { applyRemoteText, applyRemotePatch, applyPatchNack, applyTextState, flushPatchQueue, showOfflineBanner, hideOfflineBanner, ackInflight, requeueInflight } from './text-sync.js';
+import { handleWriteDenied } from './write-access.js';
+import { handlePresenceMessage, handlePresenceRequest, resetPresence } from './presence.js';
 
 // --- Identity (kept here because it touches state init + pads + ws) ---
 
@@ -101,12 +103,7 @@ export function connectWS() {
         else loadPadContent();
         break;
       case 'patch-ack':
-        if (typeof msg.seq === 'number') ackInflight(msg.seq, state.currentPadId, msg.text, msg.textVersion);
-        // Version 0 is a legitimate value — a truthiness test would skip it.
-        if (typeof msg.textVersion === 'number') {
-          const sync = getPadSync(state.currentPadId);
-          sync.textVersion = Math.max(sync.textVersion, msg.textVersion);
-        }
+        if (typeof msg.seq === 'number') ackInflight(msg.seq, state.currentPadId, msg.textVersion);
         break;
       case 'patch-nack':
         if (msg.padId === state.currentPadId) {
@@ -132,6 +129,18 @@ export function connectWS() {
       case 'online-count':
         if (msg.padId === state.currentPadId) $('#online-count').textContent = msg.count;
         break;
+      case 'presence':
+        if (msg.padId === state.currentPadId) handlePresenceMessage(msg);
+        break;
+      case 'presence-request':
+        handlePresenceRequest();
+        break;
+      case 'write-denied':
+        // Server says this socket no longer holds write access (grant expired
+        // or was revoked mid-session). Flip the editor to read-only and prompt
+        // for a passphrase.
+        handleWriteDenied();
+        break;
       case 'pad-created':
       case 'pad-updated':
       case 'pad-deleted':
@@ -147,6 +156,7 @@ export function connectWS() {
     // local typing — and (on a pad switch) the old socket can't fold its
     // in-flight patch into the newly-active pad (P1 #3).
     try { requeueInflight(newWs.padId); } catch {}
+    resetPresence();
     $('#status').className = 'status offline';
     $('#status').title = 'Disconnected - reconnecting...';
     $('#online-count').textContent = '0';
@@ -159,6 +169,12 @@ export function connectWS() {
     }
     if (e.code === 4401) { showToast('No access to this pad'); refreshPads(); return; }
     if (e.code === 4404) { showToast('Pad not found'); refreshPads(); return; }
+    if (e.code === 4405) {
+      // Write access required / expired — prompt for a passphrase, do not
+      // auto-reconnect (the reconnect loop would just hit the same gate).
+      handleWriteDenied();
+      return;
+    }
     if (e.code === 1013) {
       showToast('Server busy, retrying in 30s...');
       state.reconnectAttempts = Math.max(state.reconnectAttempts, 5);

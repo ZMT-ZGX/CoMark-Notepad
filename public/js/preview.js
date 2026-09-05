@@ -32,9 +32,19 @@ export async function openMarkdownPreview(file) {
     if (state.previewTargetId !== file.id) return;
     let html;
     if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+      // No sanitizer available — never fall through to innerHTML with raw
+      // output. Escaping into <pre> keeps the content readable and inert.
       html = `<pre>${escapeHtml(markdown)}</pre>`;
     } else {
-      html = DOMPurify.sanitize(marked.parse(markdown, { async: false }));
+      // marked passes raw HTML through from the source document, so DOMPurify
+      // is the only gate before innerHTML. Pin a version past the nesting-based
+      // mXSS advisories and additionally forbid the constructs that carry no
+      // meaning in a rendered Markdown document — belt and braces, because a
+      // future sanitizer bypass should not immediately become stored XSS.
+      html = DOMPurify.sanitize(marked.parse(markdown, { async: false }), {
+        FORBID_TAGS: ['style', 'form', 'input', 'button', 'template', 'noscript', 'iframe'],
+        FORBID_ATTR: ['style', 'srcdoc', 'formaction'],
+      });
     }
     bodyEl.className = 'preview-body';
     bodyEl.innerHTML = html;

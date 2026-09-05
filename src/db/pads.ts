@@ -1,6 +1,8 @@
 'use strict';
 
 const sqlite = require('./sqlite');
+const { FTS_SYNC_DEBOUNCE_MS } = require('../config');
+const logger = require('../utils/logger');
 
 import type { Pad } from '../types';
 
@@ -63,7 +65,88 @@ function updateText(id: number, text: string): Pad | null {
     )
     .get(text, id);
   if (!row) return null;
+  scheduleSearchSync(id, text);
   return { ...rowToPadMeta(row), text, textVersion: row.text_version };
+}
+
+// ── Throttled FTS sync ────────────────────────────────────────────────
+// The pads row is written synchronously on every edit (durability is
+// unchanged), but refreshing the trigram index used to ride along via an
+// UPDATE trigger — one full re-tokenize of the whole body per keystroke. The
+// refresh is now deferred per pad: the first edit schedules a sync, further
+// edits inside the window only overwrite the pending body, and one UPDATE
+// runs when the window closes. A crash before the flush is repaired by the
+// boot-time reconcileSearchIndex().
+
+const SEARCH_SYNC_DEBOUNCE_MS = FTS_SYNC_DEBOUNCE_MS;
+
+// Pending bodies, one entry per dirty pad. Kept outside the timer so
+// flushSearchSync() can drain synchronously on shutdown.
+const pendingSearchSync = new Map<number, string>();
+let searchSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSearchSync(id: number, text: string): void {
+  pendingSearchSync.set(id, text);
+  if (searchSyncTimer) return;
+  searchSyncTimer = setTimeout(flushSearchSync, SEARCH_SYNC_DEBOUNCE_MS);
+  searchSyncTimer.unref?.();
+}
+
+function flushSearchSync(): void {
+  searchSyncTimer = null;
+  if (pendingSearchSync.size === 0) return;
+  // Snapshot and clear up front: from here the entries are the timer's
+  // responsibility. flushSearchSync runs inside a setTimeout callback, so an
+  // unhandled throw would take the whole process down — we never let one
+  // escape onto the timer stack.
+  const entries = Array.from(pendingSearchSync);
+  pendingSearchSync.clear();
+  writeSearchEntries(entries, 0);
+}
+
+/**
+ * Apply the deferred FTS refreshes with the timer-surviving guarantee above.
+ * Any SQLite error is swallowed and retried once on the next tick (covers the
+ * transient cases — SQLITE_BUSY under a concurrent writer, a WAL checkpoint);
+ * a second failure drops the entries rather than retrying forever. Nothing
+ * here is unrecoverable: reconcileSearchIndex() rebuilds the whole FTS index
+ * from the bodies at boot, and any pad edited again schedules a fresh sync.
+ */
+function writeSearchEntries(entries: [number, string][], attempt: number): void {
+  try {
+    const db = sqlite.getDb();
+    const update = db.prepare('UPDATE pad_search SET content = ? WHERE id = ?');
+    const batch = db.transaction((rows: [number, string][]) => {
+      for (const [id, text] of rows) update.run(text, id);
+    });
+    batch(entries);
+  } catch (err) {
+    if (attempt < 1) {
+      const retry = setTimeout(
+        () => writeSearchEntries(entries, attempt + 1),
+        SEARCH_SYNC_DEBOUNCE_MS
+      );
+      retry.unref?.();
+      return;
+    }
+    logger.error(
+      { err, pads: entries.length },
+      'FTS refresh failed after retry; index rebuilt at next boot'
+    );
+  }
+}
+
+/**
+ * Synchronously flush any pending FTS refreshes ("now", as opposed to the
+ * debounced flush). Called on graceful shutdown so a search started right
+ * after a restart never misses recent edits.
+ */
+function flushSearchSyncNow(): void {
+  if (searchSyncTimer) {
+    clearTimeout(searchSyncTimer);
+    searchSyncTimer = null;
+  }
+  flushSearchSync();
 }
 
 function updatePassword(id: number, passwordHash: string | null): Pad | null {
@@ -185,4 +268,5 @@ module.exports = {
   remove,
   searchPads,
   searchSnippet,
+  flushSearchSyncNow,
 };

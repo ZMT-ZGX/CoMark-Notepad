@@ -9,7 +9,6 @@ import type {
   FileInfo,
 } from '../types';
 const path = require('path');
-const fs = require('fs');
 const logger = require('../utils/logger');
 const DiffMatchPatch = require('diff-match-patch');
 const {
@@ -21,6 +20,7 @@ const {
 const { canAccessPad, canAccessFile, canManagePad } = require('../utils/auth');
 const { hashPassword, verifyPassword } = require('../auth/password');
 const { generateId } = require('../utils/crypto');
+const { safeUnlink } = require('../utils/file');
 const { MAX_PADS, UNLOCK_TOKEN_TTL_MS } = require('../config');
 
 class PadService {
@@ -191,7 +191,18 @@ class PadService {
     // Reject stale patches so the client can merge its intended full text via
     // the conditional HTTP path instead of applying an operation to a
     // different document and silently overwriting a concurrent edit.
-    if (baseVersion != null && pad.textVersion !== baseVersion) {
+    //
+    // `baseVersion` is therefore MANDATORY, not optional. Previously the whole
+    // check was skipped when the field was absent, which made the concurrency
+    // control opt-in: any non-conforming (or malicious) client could disable
+    // it by simply omitting one field and then apply a diff against whatever
+    // the server happens to hold right now, silently clobbering a concurrent
+    // edit. The server cannot infer a base version, so an undeclared write
+    // must be rejected rather than guessed at.
+    if (baseVersion == null) {
+      return { ok: false, missingBaseVersion: true, pad };
+    }
+    if (pad.textVersion !== baseVersion) {
       return { ok: false, pad };
     }
 
@@ -235,21 +246,20 @@ class PadService {
       }
     }
 
-    // One frame per edit, not two. The `patch` frame already carries the
-    // authoritative body (`text`) alongside the diff, so a separate
-    // `text-update` frame duplicated the whole document on every keystroke —
-    // and the client discarded it anyway: `patch` advances the local version to
-    // N, so the follow-up snapshot at version N was dropped by the
-    // `version <= sync.textVersion` guard in applyRemoteText.
-    // The diff is kept because it is tiny for ordinary typing and is the
-    // client's fallback when a frame arrives without an authoritative body.
+    // One frame per edit, diff-only. The receiver rebuilds the body by
+    // applying the patch to its shadow; a receiver that can't apply it
+    // cleanly resyncs via the HTTP pad-text endpoint. Carrying the
+    // authoritative body here too meant every keystroke shipped the whole
+    // document to every other client — on a 100KB pad with four peers that
+    // is ~400KB of outbound JSON per character typed, vs a few bytes of
+    // diff. The body in the frame was only ever a shortcut: the failure
+    // path (patch_apply fails → loadPadContent()) already covers recovery.
     this.broadcast.toPad(
       padId,
       {
         type: 'patch',
         padId,
         data: patchText,
-        text: updated.text,
         textVersion: updated.textVersion,
         senderId: excludeWsId || null,
         operationId: operationId || undefined,
@@ -275,7 +285,12 @@ class PadService {
     // client's base version still matches the server's. A mismatch means
     // another client edited in the meantime — blindly overwriting would erase
     // their work, so we report a conflict and let the client merge instead.
-    if (baseVersion != null && pad.textVersion !== baseVersion) {
+    //
+    // As on the patch path, `baseVersion` is MANDATORY: omitting it used to
+    // skip this guard entirely, turning a full-text PUT into an unconditional
+    // overwrite of the whole pad. An undeclared write is treated as a
+    // conflict so the client takes its existing resync-and-merge path.
+    if (baseVersion == null || pad.textVersion !== baseVersion) {
       return { ok: false, conflict: true, pad };
     }
 
@@ -369,30 +384,31 @@ class PadService {
       throw ForbiddenError('Access denied');
     }
 
-    if (this.store.countPads() <= 1) throw BadRequestError('Cannot delete the last pad');
+    // Zero pads is a valid state: a fresh install no longer seeds a public
+    // Pad #1, so there is nothing that must be kept alive.
 
     for (const [token, entry] of this.unlockTokens) {
       if (entry.padId === padId) this.unlockTokens.delete(token);
     }
 
-    // Delete files (both DB rows and disk) BEFORE removing the pad
+    // Remove file DB rows first, then the pad row. Disk unlinks run last
+    // (concurrently via fs.promises) so a crash between DB and disk leaves
+    // orphan files (harmless) rather than orphan DB rows pointing to missing
+    // files. Broadcast file-deleted before pad-deleted so clients still
+    // connected to the pad can process the event.
     const filesToDelete = this.store.findAllFiles().filter((f) => f.padId === padId);
-    for (const file of filesToDelete) {
-      try {
-        fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
-      } catch {
-        /* file may have already been removed */
-      }
-    }
     if (filesToDelete.length > 0) {
       this.store.removeFilesMany(filesToDelete.map((f) => f.id));
     }
-
-    this.store.removePad(padId);
-    this.broadcast.toAll({ type: 'pad-deleted', padId });
     for (const file of filesToDelete) {
       this.broadcast.toPad(padId, { type: 'file-deleted', padId, fileId: file.id });
     }
+    this.store.removePad(padId);
+    this.broadcast.toAll({ type: 'pad-deleted', padId });
+    // Disk cleanup after DB is consistent; safeUnlink swallows ENOENT.
+    await Promise.all(
+      filesToDelete.map((file) => safeUnlink(path.join(this.store.FILES_DIR, file.filename)))
+    );
 
     return { ok: true, deletedFiles: filesToDelete.length };
   }

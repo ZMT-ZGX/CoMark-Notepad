@@ -3,23 +3,24 @@
 import type { Services } from './types';
 
 const http = require('http');
-const fs = require('fs');
 const path = require('path');
 const QRCode = require('qrcode');
 
 const { PORT, FILE_TTL_HOURS, FILE_TTL_CHECK_INTERVAL_MS } = require('./config');
 const logger = require('./utils/logger');
-const { getLanIP } = require('./utils/file');
+const { getLanIP, safeUnlink } = require('./utils/file');
 const db = require('./db');
 const { createDataStore } = require('./store');
 const session = require('./auth/session');
 const { createApp } = require('./app');
 const { initWSS } = require('./ws');
 const broadcast = require('./ws/broadcast');
+const { safeClose } = require('./ws/close');
 const PadService = require('./services/padService');
 const FileService = require('./services/fileService');
 const InviteService = require('./services/inviteService');
 const ConvertService = require('./services/convertService');
+const WriteAccessService = require('./services/writeAccessService');
 
 async function start() {
   // 1. Open SQLite database (backward-compat method name from JSON store era)
@@ -43,8 +44,17 @@ async function start() {
   const fileService = new FileService(dataStore, broadcast, padService);
   const inviteService = new InviteService(dataStore, broadcast, connections.getPadClients);
   const convertService = new ConvertService(dataStore, broadcast);
+  const writeAccessService = new WriteAccessService(dataStore, require('./config'));
 
-  const services: Services = { db, padService, fileService, inviteService, convertService };
+  const services: Services = {
+    store: dataStore,
+    db,
+    padService,
+    fileService,
+    inviteService,
+    convertService,
+    writeAccessService,
+  };
 
   // 6. Create Express app
   const app = createApp(services, getServerPort, connections.getPadClients);
@@ -53,7 +63,7 @@ async function start() {
   const server = http.createServer(app);
 
   // 8. Init WebSocket
-  const { wss, heartbeatTimer } = initWSS(server, padService);
+  const { wss, heartbeatTimer } = initWSS(server, padService, writeAccessService);
 
   // --- Helpers ---
   function getServerPort() {
@@ -62,16 +72,20 @@ async function start() {
   }
 
   // --- File TTL cleanup ---
-  function cleanupExpiredFiles() {
+  // Deletes files past their TTL that are not referenced by any pad body
+  // (see db/files.ts findExpired). Unlinking is awaited concurrently via
+  // fs.promises — a batch of expired files must not stall the event loop
+  // with synchronous disk I/O.
+  async function cleanupExpiredFiles() {
     const ttlMs = FILE_TTL_HOURS * 3600000;
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) return;
     const expired = db.files.removeExpired(ttlMs);
     if (expired.length === 0) return;
-    for (const file of expired) {
-      try {
-        fs.unlinkSync(path.join(db.FILES_DIR, file.filename));
-      } catch {}
-    }
+    await Promise.all(
+      expired.map((file: { filename: string }) =>
+        safeUnlink(path.join(db.FILES_DIR, file.filename))
+      )
+    );
     const defaultPadId = db.pads.findAll()[0]?.id || 1;
     for (const file of expired) {
       const filePadId = file.padId || defaultPadId;
@@ -90,15 +104,16 @@ async function start() {
     clearInterval(fileTtlTimer);
     clearInterval(padService.getCleanupTimer());
     clearInterval(session.getCleanupTimer());
+    // Persist any FTS refreshes the throttle still held in memory so search
+    // is not stale until the next boot-time rebuild.
+    db.pads.flushSearchSyncNow();
     // Close SQLite database (backward-compat method name from JSON store era)
     db.store.flushSync();
 
     // Close all WebSocket connections
     try {
       for (const client of wss.clients) {
-        try {
-          client.close(1001, 'Server shutting down');
-        } catch {}
+        safeClose(client, 1001, 'Server shutting down');
       }
     } catch {}
 
@@ -127,7 +142,9 @@ async function start() {
     const url = `http://${lanIP}:${currentPort}`;
 
     // Initial TTL cleanup run
-    cleanupExpiredFiles();
+    cleanupExpiredFiles().catch((err: Error) =>
+      logger.warn({ err }, 'Initial file TTL cleanup failed')
+    );
 
     // Startup info
     logger.info('CoMark-Notepad is running!');

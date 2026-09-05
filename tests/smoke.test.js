@@ -8,80 +8,45 @@ const { setTimeout: delay } = require('node:timers/promises');
 const WebSocket = require('ws');
 const DiffMatchPatch = require('diff-match-patch');
 
-const PROJECT_DIR = path.resolve(__dirname, '..');
+const { PROJECT_DIR, spawnServer, stopServer } = require('./helpers');
 
-function startServer(extraEnv = {}) {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comark-notepad-'));
+// NOTE: smoke does not install the helpers' global fetch Origin wrapper — it
+// injects Origin per request via fetchJson, and some cases below assert the
+// rejection of requests that legitimately carry no Origin header.
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [require.resolve('tsx/cli'), 'src/server.ts'], {
-      cwd: PROJECT_DIR,
-      env: { ...process.env, PORT: '0', DATA_DIR: dataDir, ...extraEnv },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGKILL');
-      reject(new Error(`Timed out starting server.\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 5000);
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-      const match = stdout.match(/Local:\s+http:\/\/localhost:(\d+)/);
-      if (!match || settled) return;
-
-      settled = true;
-      clearTimeout(timeout);
-      resolve({
-        child,
-        dataDir,
-        port: Number(match[1]),
-        baseUrl: `http://127.0.0.1:${match[1]}`,
-        wsUrl: `ws://127.0.0.1:${match[1]}`,
-      });
-    });
-
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on('exit', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(new Error(`Server exited early with code ${code} signal ${signal}.\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    });
+/**
+ * A fresh install intentionally starts with zero pads — the legacy always-seeded
+ * Pad #1 was public (owner NULL) and therefore readable by anyone who could
+ * register, which is wrong for a public deployment.
+ *
+ * Most tests below exercise the legacy single-pad topology, so they opt into
+ * creating one. Creating it as an anonymous user yields ownerUserId = null,
+ * i.e. a public pad with id 1 — exactly the old default.
+ */
+async function ensurePublicPad(server, extraEnv = {}) {
+  const { response, body } = await fetchJson(server.baseUrl, '/api/pads', {
+    method: 'POST',
+    headers: { Origin: extraEnv.PUBLIC_ORIGIN || server.baseUrl },
   });
+  if (response.status !== 200) {
+    throw new Error(`bootstrap pad failed: ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body.id;
 }
 
-async function stopServer(server) {
-  const { child, dataDir } = server;
-
-  await new Promise((resolve) => {
-    if (child.exitCode !== null) {
-      resolve();
-      return;
+function startServer(extraEnv = {}, { bootstrap = true } = {}) {
+  return spawnServer(extraEnv).then(async (server) => {
+    if (!bootstrap) return server;
+    try {
+      await ensurePublicPad(server, extraEnv);
+    } catch (e) {
+      // Never leak the spawned server: node --test waits for the event loop to
+      // drain, so an orphaned child hangs the entire run.
+      await stopServer(server);
+      throw e;
     }
-
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-    }, 1000);
-
-    child.once('exit', () => {
-      clearTimeout(timeout);
-      resolve();
-    });
-
-    child.kill('SIGINT');
+    return server;
   });
-
-  fs.rmSync(dataDir, { recursive: true, force: true });
 }
 
 async function fetchJson(baseUrl, pathname, init) {
@@ -164,15 +129,41 @@ async function createReadyClient(wsUrl, padId = 1) {
   return client;
 }
 
-test('state endpoint returns default shape with one pad', async () => {
-  const server = await startServer();
+test('fresh install starts with zero pads (no public Pad #1)', async () => {
+  const server = await startServer({}, { bootstrap: false });
   try {
     const { response, body } = await fetchJson(server.baseUrl, '/api/state');
     assert.equal(response.status, 200);
-    assert.equal(body.pads.length, 1);
-    assert.equal(body.pads[0].id, 1);
-    assert.equal(body.pads[0].hasPassword, false);
+    assert.deepEqual(body.pads, []);
     assert.deepEqual(body.files, []);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('pad created by an authenticated user is owned by that user', async () => {
+  const server = await startServer({}, { bootstrap: false });
+  try {
+    // Register to obtain a session cookie for this request.
+    const registerRes = await fetch(`${server.baseUrl}/api/auth/register`, { method: 'POST' });
+    const cookie = registerRes.headers.get('set-cookie').split(';')[0];
+    const { response, body } = await fetchJson(server.baseUrl, '/api/pads', {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    });
+    assert.equal(response.status, 200);
+    assert.ok(body.ownerUserId, 'owned pad should carry the creator user code');
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('pad created without a session stays public (ownerUserId null)', async () => {
+  const server = await startServer({}, { bootstrap: false });
+  try {
+    const { response, body } = await fetchJson(server.baseUrl, '/api/pads', { method: 'POST' });
+    assert.equal(response.status, 200);
+    assert.equal(body.ownerUserId, null);
   } finally {
     await stopServer(server);
   }
@@ -244,7 +235,7 @@ test('text updates are scoped to the same pad', async () => {
     const { response, body } = await fetchJson(server.baseUrl, '/api/pads/1/text', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: 'pad 1 test', _wsId: a.wsId }),
+      body: JSON.stringify({ text: 'pad 1 test', _wsId: a.wsId, baseVersion: 0 }),
     });
 
     assert.equal(response.status, 200);
@@ -358,7 +349,10 @@ test('pad password protection', async () => {
 });
 
 test('locked pad content is not exposed through search without an unlock token', async () => {
-  const server = await startServer({ ADMIN_TOKEN: 'admin123' });
+  // FTS_SYNC_DEBOUNCE_MS is cut to 20ms because the FTS refresh is throttled:
+  // the search below must see the freshly-seeded body without waiting a full
+  // second, while still exercising the real (async) sync path.
+  const server = await startServer({ ADMIN_TOKEN: 'admin123', FTS_SYNC_DEBOUNCE_MS: '20' });
   try {
     // Admin sets a password on the public pad 1 and receives an unlock token.
     const setPassword = await fetchJson(server.baseUrl, '/api/pads/1/password', {
@@ -374,9 +368,13 @@ test('locked pad content is not exposed through search without an unlock token',
     const putRes = await fetchJson(server.baseUrl, '/api/pads/1/text', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Pad-Token': token, Origin: server.baseUrl },
-      body: JSON.stringify({ text: `secret note ${unique}` }),
+      body: JSON.stringify({ text: `secret note ${unique}`, baseVersion: 0 }),
     });
     assert.equal(putRes.response.status, 200);
+
+    // Wait out the (shortened) FTS sync debounce so the search below sees
+    // the freshly-seeded body.
+    await delay(200);
 
     // Search WITHOUT an unlock token must not leak the locked pad's content.
     const lockedSearch = await fetchJson(server.baseUrl, `/api/search?q=${unique}`, {
@@ -824,7 +822,7 @@ test('requireOrigin rejects cross-origin write requests', async () => {
     const ok = await fetch(`${server.baseUrl}/api/pads/1/text`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: server.baseUrl },
-      body: JSON.stringify({ text: 'good' }),
+      body: JSON.stringify({ text: 'good', baseVersion: 0 }),
     });
     assert.equal(ok.status, 200);
   } finally {
@@ -925,7 +923,7 @@ test('patch messages sync between clients on the same pad', async () => {
     await fetchJson(server.baseUrl, '/api/pads/1/text', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
-      body: JSON.stringify({ text: 'Hello' }),
+      body: JSON.stringify({ text: 'Hello', baseVersion: 0 }),
     });
 
     const a = await createReadyClient(server.wsUrl, 1);
@@ -934,17 +932,24 @@ test('patch messages sync between clients on the same pad', async () => {
 
     // Client A sends a valid patch: "Hello" → "Hello World"
     const patchText = makePatch('Hello', 'Hello World');
-    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: patchText }));
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: patchText, baseVersion: 1 }));
 
-    // A should receive patch-ack
+    // A should receive patch-ack. Diff-only: the server applied the patch
+    // because A's base version matched, so echoing the body back would
+    // serialize the whole document per keystroke for zero information.
     const ack = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
     assert.ok(ack.textVersion > 0, 'patch-ack should carry a positive textVersion');
+    assert.equal(ack.text, undefined, 'patch-ack must be diff-only (no authoritative body)');
 
-    // B should receive the broadcast patch
+    // B should receive the broadcast patch, also diff-only: the receiver
+    // rebuilds the body by applying the diff to its own shadow.
     const remote = await waitForMessage(b, (msg) => msg.type === 'patch', 1500);
     assert.equal(remote.padId, 1);
     assert.equal(remote.data, patchText);
-    assert.equal(remote.text, 'Hello World', 'patch frame must carry the authoritative body');
+    assert.equal(remote.text, undefined, 'patch frame must be diff-only (no authoritative body)');
+    const dmp = new DiffMatchPatch();
+    const [rebuilt] = dmp.patch_apply(dmp.patch_fromText(remote.data), 'Hello');
+    assert.equal(rebuilt, 'Hello World', 'receiver must rebuild the body from the diff alone');
 
     // Exactly ONE broadcast frame per edit. A second `text-update` snapshot
     // used to double the outbound body on every keystroke, and the client
@@ -975,7 +980,7 @@ test('malformed patch triggers patch-nack with server text', async () => {
     a.drain();
 
     // Send garbage that is not a valid patch
-    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: '@@@ invalid @@@' }));
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: '@@@ invalid @@@', baseVersion: 0 }));
 
     // Server should respond with patch-nack (not patch-ack)
     const nack = await waitForMessage(a, (msg) => msg.type === 'patch-nack', 1500);
@@ -995,34 +1000,46 @@ test('malformed patch triggers patch-nack with server text', async () => {
   }
 });
 
-test('concurrent patches at same position both succeed', async () => {
+test('concurrent patches at the same position: exactly one wins, the stale one is nacked', async () => {
   const server = await startServer();
   try {
-    // Seed text so both clients share shadow "Hello"
+    // Seed text so both clients share the shadow "Hello".
     await fetchJson(server.baseUrl, '/api/pads/1/text', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
-      body: JSON.stringify({ text: 'Hello' }),
+      body: JSON.stringify({ text: 'Hello', baseVersion: 0 }),
     });
 
     const a = await createReadyClient(server.wsUrl, 1);
     const b = await createReadyClient(server.wsUrl, 1);
     a.drain(); b.drain();
 
-    // Both send patches concurrently based on shadow "Hello"
-    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('Hello', 'HelloAAA') }));
-    b.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('Hello', 'HelloBBB') }));
+    const base = (await (await fetch(`${server.baseUrl}/api/pads/1`)).json()).textVersion;
 
-    // Both should receive patch-ack (dmp fuzzy-match tolerates drift)
-    const ackA = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
-    const ackB = await waitForMessage(b, (msg) => msg.type === 'patch-ack', 1500);
-    assert.ok(ackA.textVersion > 0);
-    assert.ok(ackB.textVersion > 0);
+    // Both clients diffed from the same shadow, so both declare the same base.
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('Hello', 'HelloAAA'), baseVersion: base }));
+    b.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('Hello', 'HelloBBB'), baseVersion: base }));
 
-    // Server text should contain both edits
+    const ackA = await waitForMessage(a, (msg) => msg.type === 'patch-ack' || msg.type === 'patch-nack', 1500);
+    const ackB = await waitForMessage(b, (msg) => msg.type === 'patch-ack' || msg.type === 'patch-nack', 1500);
+
+    // Once the first patch lands, the second one's base version is stale, so
+    // it MUST be rejected instead of being applied on top of the winner.
+    // "Both succeed" was only ever possible because the version check was
+    // skipped when the client omitted baseVersion.
+    assert.deepEqual(
+      [ackA.type, ackB.type].sort(),
+      ['patch-ack', 'patch-nack'],
+      'exactly one of two patches sharing a base version must be applied'
+    );
+
+    // No corruption: the body is one coherent document, not an interleaving
+    // of two diffs applied out of order.
     const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
-    assert.ok(pad.text.includes('AAA'), 'server text should contain A edit');
-    assert.ok(pad.text.includes('BBB'), 'server text should contain B edit');
+    assert.ok(
+      pad.text === 'HelloAAA' || pad.text === 'HelloBBB',
+      `body must be exactly one of the two candidate edits, got: ${pad.text}`
+    );
 
     await closeClient(a);
     await closeClient(b);
@@ -1042,7 +1059,7 @@ test('patch-ack echoes the client-provided seq for reliable delivery', async () 
     // exact in-flight patch and advance its confirmed shadow (and, on a drop
     // before ACK, re-queue only the unconfirmed edits). Without the echo the
     // client can't distinguish which patch was confirmed.
-    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('', 'seq tracked edit'), seq: 7 }));
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('', 'seq tracked edit'), seq: 7, baseVersion: 0 }));
 
     const ack = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
     assert.equal(ack.seq, 7, 'patch-ack must echo the seq the client sent');
@@ -1070,7 +1087,7 @@ test('WS patch rate limit closes connection with code 4001', async () => {
 
     // Send more patches than the per-window limit (5)
     for (let i = 0; i < 8; i++) {
-      a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('', `text${i}`) }));
+      a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: makePatch('', `text${i}`), baseVersion: 0 }));
     }
 
     // Connection should be closed by server with code 4001
@@ -1156,5 +1173,207 @@ test('unauthenticated connections to a locked pad count toward the per-IP limit'
     }
   } finally {
     await stopServer(server);
+  }
+});
+
+test('stale patch (mismatched baseVersion) is rejected with patch-nack', async () => {
+  const server = await startServer();
+  try {
+    await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
+      body: JSON.stringify({ text: 'v1 body', baseVersion: 0 }),
+    });
+
+    const a = await createReadyClient(server.wsUrl, 1);
+    a.drain();
+
+    // The patch was diffed against a version the server has already moved
+    // past — applying it would silently overwrite a concurrent edit, so the
+    // server must reject it and hand back the authoritative body.
+    const stalePatch = makePatch('v1 body', 'v1 body plus local edit');
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: stalePatch, baseVersion: 9999 }));
+
+    const nack = await waitForMessage(a, (msg) => msg.type === 'patch-nack', 1500);
+    assert.equal(nack.padId, 1);
+    assert.equal(nack.text, 'v1 body', 'patch-nack must carry the authoritative body for resync');
+
+    const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
+    assert.equal(pad.text, 'v1 body', 'stale patch must not modify the pad');
+
+    await closeClient(a);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('matching baseVersion patch is accepted and acked without body', async () => {
+  const server = await startServer();
+  try {
+    await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
+      body: JSON.stringify({ text: 'hello', baseVersion: 0 }),
+    });
+    const pad = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
+
+    const a = await createReadyClient(server.wsUrl, 1);
+    a.drain();
+
+    const patchText = makePatch('hello', 'hello world');
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: patchText, baseVersion: pad.textVersion }));
+
+    const ack = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
+    assert.equal(ack.textVersion, pad.textVersion + 1);
+    assert.equal(ack.seq, undefined, 'ack echoes seq only when the client sent one');
+
+    const after = await (await fetch(`${server.baseUrl}/api/pads/1`)).json();
+    assert.equal(after.text, 'hello world');
+
+    await closeClient(a);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('presence frames are relayed to pad peers and removed on disconnect', async () => {
+  const server = await startServer();
+  try {
+    const a = await createReadyClient(server.wsUrl, 1);
+    const b = await createReadyClient(server.wsUrl, 1);
+    a.drain();
+    b.drain();
+
+    // A announces itself; B must see the relay with A's socket id attached.
+    a.socket.send(JSON.stringify({ type: 'presence', name: 'Alice', active: true }));
+    const presence = await waitForMessage(
+      b,
+      (msg) => msg.type === 'presence' && msg.name === 'Alice',
+      1500
+    );
+    assert.equal(presence.wsId, a.wsId, 'relayed presence must carry the sender socket id');
+    assert.equal(presence.active, true);
+    assert.ok(!presence.gone);
+
+    // The sender must NOT see its own presence echoed back.
+    await expectNoMessage(
+      a,
+      (msg) => msg.type === 'presence' && msg.name === 'Alice',
+      300
+    );
+
+    // On disconnect the room is told the peer is gone.
+    await closeClient(a);
+    const gone = await waitForMessage(b, (msg) => msg.type === 'presence' && msg.gone, 1500);
+    assert.equal(gone.wsId, a.wsId, 'the gone frame must identify the departed socket');
+
+    await closeClient(b);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('FTS search reflects edits only after the sync debounce', async () => {
+  const server = await startServer({ FTS_SYNC_DEBOUNCE_MS: '80' });
+  try {
+    // Seed through the JSON store migration so pad 1 exists with searchable
+    // text, then edit it over the normal write path.
+    await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
+      body: JSON.stringify({ text: 'searchable zebra term', baseVersion: 0 }),
+    });
+
+    // Immediately after the write the throttled index has not caught up —
+    // this is the accepted (documented) consistency window.
+    const early = await fetchJson(server.baseUrl, '/api/search?q=zebra', {
+      headers: { Origin: server.baseUrl },
+    });
+    assert.equal(early.response.status, 200);
+    assert.equal(
+      (early.body.results || []).length,
+      0,
+      'search must not see the edit before the FTS sync debounce fires'
+    );
+
+    // After the debounce the throttled sync must have refreshed the index.
+    await delay(400);
+    const later = await fetchJson(server.baseUrl, '/api/search?q=zebra', {
+      headers: { Origin: server.baseUrl },
+    });
+    assert.equal(later.response.status, 200);
+    assert.equal(
+      (later.body.results || []).length > 0,
+      true,
+      'search must find the edit once the throttled FTS sync has run'
+    );
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('TTL cleanup deletes expired unreferenced files but keeps pad-referenced ones', async () => {
+  const Database = require('better-sqlite3');
+  const server = await startServer();
+  const dataDir = server.dataDir;
+  let fileA;
+  let fileB;
+  let server2 = null;
+  try {
+    // Two uploads to pad 1: A will be referenced from the pad body, B will
+    // not. (Upload finalization streams to a .part file and renames — a
+    // successful upload response already proves that path works.)
+    const upload = async (name, content) => {
+      const formData = new FormData();
+      formData.append('padId', '1');
+      formData.append('file', new Blob([content], { type: 'text/plain' }), name);
+      const res = await fetchJson(server.baseUrl, '/api/upload', { method: 'POST', body: formData });
+      assert.equal(res.response.status, 200);
+      return res.body;
+    };
+    fileA = await upload('referenced.txt', 'referenced content\n');
+    fileB = await upload('orphan.txt', 'orphan content\n');
+
+    // Stop the server but keep its data dir so the test can age the file
+    // rows directly: the TTL only expires files older than FILE_TTL_HOURS
+    // and these uploads are brand new.
+    await new Promise((resolve) => {
+      if (server.child.exitCode !== null) return resolve();
+      const killer = setTimeout(() => server.child.kill('SIGKILL'), 1000);
+      server.child.once('exit', () => {
+        clearTimeout(killer);
+        resolve();
+      });
+      server.child.kill('SIGINT');
+    });
+
+    const db = new Database(path.join(dataDir, 'store.db'));
+    const veryOld = Date.now() - 100 * 24 * 60 * 60 * 1000; // far past the 72h default TTL
+    db.prepare('UPDATE files SET created_at = ? WHERE id = ?').run(veryOld, fileA.id);
+    db.prepare('UPDATE files SET created_at = ? WHERE id = ?').run(veryOld, fileB.id);
+    db.prepare('UPDATE pads SET text = ? WHERE id = 1').run(
+      `see attachment: ![att](/api/files/${fileA.id})`
+    );
+    db.close();
+
+    // Boot GC runs once on listen: it must delete the unreferenced expired
+    // file and keep the one the pad body still links to.
+    server2 = await startServer({ DATA_DIR: dataDir }, { bootstrap: false });
+    const state = await fetchJson(server2.baseUrl, '/api/state');
+    const ids = (state.body.files || []).map((f) => f.id);
+    assert.ok(ids.includes(fileA.id), 'referenced file must survive TTL cleanup');
+    assert.ok(!ids.includes(fileB.id), 'unreferenced expired file must be collected');
+
+    assert.ok(
+      fs.existsSync(path.join(dataDir, 'files', fileA.filename)),
+      'referenced file must still exist on disk'
+    );
+    assert.ok(
+      !fs.existsSync(path.join(dataDir, 'files', fileB.filename)),
+      'collected file must be removed from disk (async unlink)'
+    );
+  } finally {
+    if (server2) await stopServer(server2);
+    else fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });

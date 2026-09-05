@@ -12,10 +12,11 @@ const {
   resolveFileOwner,
 } = require('../utils/auth');
 const { generateId } = require('../utils/crypto');
-const { formatBytes, downloadBasename } = require('../utils/file');
-const { MAX_FILE_BYTES } = require('../config');
+const { formatBytes, downloadBasename, safeUnlink } = require('../utils/file');
+const { MAX_FILE_BYTES, MAX_STORAGE_BYTES, MAX_STORAGE_BYTES_PER_USER } = require('../config');
 const logger = require('../utils/logger');
 const { extractPadTokens, hasValidUnlockToken } = require('../middlewares/security');
+const storageQuota = require('./storageQuota');
 
 // A pad is public when it has neither an owner nor a creator code — accessible
 // to anyone. Centralized here so the same definition is reused everywhere.
@@ -90,6 +91,13 @@ class FileService {
     let padIdField: number | null = null;
     let fileInfo: import('../types').FileInfo | null = null;
     let filePath: string | null = null;
+    // Uploads stream into a `.part` sibling and are renamed into place only
+    // after the stream finishes, so a concurrent lister/downloader can never
+    // observe a half-written file (rename is atomic on the same filesystem).
+    let partPath: string | null = null;
+    // True once the `files` row exists. From that point the on-disk file is
+    // owned by the store and must survive even if cleanup runs.
+    let committed = false;
     let writeStream: ReturnType<typeof fs.createWriteStream> | null = null;
     let fileWritePromise: Promise<void> | null = null;
     let fileSeen = false;
@@ -104,12 +112,18 @@ class FileService {
         writeStream.destroy();
         writeStream = null;
       }
-      if (filePath && fs.existsSync(filePath)) {
-        try {
-          fs.unlinkSync(filePath);
-        } catch {}
-      }
+      // Two shapes of leftover, and both are invisible to TTL cleanup (which
+      // only walks the `files` table): the `.part` temp file before the
+      // rename, and the promoted file after it but before the DB row. Leaving
+      // the second behind is what made rejected uploads accumulate on disk.
+      const stalePaths = [partPath, committed ? null : filePath];
+      partPath = null;
       filePath = null;
+      for (const stale of stalePaths) {
+        // Fire-and-forget: callers are synchronous busboy event handlers, and
+        // safeUnlink swallows ENOENT, so no existsSync probe is needed.
+        if (stale) void safeUnlink(stale);
+      }
     };
 
     const fail = (status: number, error: string) => {
@@ -162,6 +176,7 @@ class FileService {
         const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
         const filename = `${id}_${safeName}`;
         filePath = path.join(this.store.FILES_DIR, filename);
+        partPath = `${filePath}.part`;
 
         // Early access check
         if (padIdField !== null) {
@@ -184,7 +199,7 @@ class FileService {
           padId: 1,
         } as import('../types').FileInfo;
 
-        writeStream = fs.createWriteStream(filePath, { flags: 'wx' });
+        writeStream = fs.createWriteStream(partPath, { flags: 'wx' });
         fileWritePromise = new Promise((resolve, reject) => {
           writeStream.on('finish', resolve);
           writeStream.on('error', reject);
@@ -229,7 +244,18 @@ class FileService {
 
       if (finished || aborted) return;
 
-      // Resolve file ownership and pad association
+      // Resolve + authorize BEFORE promoting the temp file.
+      //
+      // Ordering is a security property, not a style choice. Once renamed, the
+      // bytes sit on disk with no `files` row, and TTL cleanup only walks that
+      // table — so any rejection after the rename leaves a file nothing will
+      // ever collect. An unauthenticated client could then fill the disk
+      // (100MB per request, 20 uploads / 15min per IP) by uploading to a pad id
+      // that does not exist, or to a pad it cannot access.
+      //
+      // This must also run after busboy has finished: the `padId` field may
+      // arrive *after* the file part, so the early check in the `file` handler
+      // is best-effort only and this one is authoritative.
       const targetPadId = padIdField || this.store.findAllPadMeta()[0]?.id || 1;
       const targetPad = this.store.findPadById(targetPadId);
       if (!targetPad) return fail(404, 'Pad not found');
@@ -247,19 +273,75 @@ class FileService {
         return fail(403, 'Pad locked');
       }
 
-      if (!fileInfo) return fail(500, 'File info missing');
-      const finalInfo = fileInfo as import('../types').FileInfo;
-      finalInfo.ownerUserId = resolveFileOwner(req.userId, targetPad);
-      finalInfo.padId = targetPadId;
+      // ── Storage quota ────────────────────────────────────────────
+      // Checked before the rename so a rejected upload leaves nothing on
+      // disk: `fail()` runs cleanupPartialFile(). Without this an account
+      // could upload 100MB files until the disk filled.
+      //
+      // The bytes are reserved here, in the same synchronous block as the
+      // check and before the first `await` below — see reserveStorageQuota.
+      const incomingSize = fileInfo ? fileInfo.size : 0;
+      const quotaOwner = resolveFileOwner(req.userId, targetPad);
+      const releaseQuota = storageQuota.reserve(incomingSize, quotaOwner);
+      try {
+        const usedTotal = storageQuota.used(this.store.sumFileBytes());
+        if (usedTotal > MAX_STORAGE_BYTES) {
+          logger.warn('upload rejected: instance storage quota exceeded', {
+            used: usedTotal,
+            incomingSize,
+            limit: MAX_STORAGE_BYTES,
+          });
+          return fail(413, 'Storage quota exceeded');
+        }
+        if (quotaOwner) {
+          const usedByUser = storageQuota.usedBy(this.store.sumFileBytes(quotaOwner), quotaOwner);
+          if (usedByUser > MAX_STORAGE_BYTES_PER_USER) {
+            logger.warn('upload rejected: per-account storage quota exceeded', {
+              ownerUserId: quotaOwner,
+              used: usedByUser,
+              incomingSize,
+              limit: MAX_STORAGE_BYTES_PER_USER,
+            });
+            return fail(413, 'Storage quota exceeded for this account');
+          }
+        }
 
-      this.store.createFile(finalInfo);
-      this.broadcast.toPad(
-        finalInfo.padId,
-        { type: 'file-added', padId: finalInfo.padId, file: finalInfo },
-        excludeWsId
-      );
-      finished = true;
-      if (!res.headersSent) res.json(finalInfo);
+        // Promote the completed `.part` file to its final name. After this
+        // point the file is immutable content, so a reader that wins the race
+        // sees the whole file or none of it — never a partial body.
+        if (!partPath || !filePath) return fail(500, 'Upload target missing');
+        try {
+          await fs.promises.rename(partPath, filePath);
+          partPath = null;
+        } catch (err) {
+          logger.error({ err }, 'Failed to finalize upload');
+          return fail(500, 'Failed to save upload');
+        }
+
+        if (finished || aborted) return;
+
+        if (!fileInfo) return fail(500, 'File info missing');
+        const finalInfo = fileInfo as import('../types').FileInfo;
+        finalInfo.ownerUserId = resolveFileOwner(req.userId, targetPad);
+        finalInfo.padId = targetPadId;
+
+        committed = true;
+        this.store.createFile(finalInfo);
+        // The row is in the table, so it accounts for its own bytes from here
+        // on. Releasing before any await keeps the accounting exact — a
+        // concurrent upload sees either the reservation or the row, never both.
+        releaseQuota();
+        this.broadcast.toPad(
+          finalInfo.padId,
+          { type: 'file-added', padId: finalInfo.padId, file: finalInfo },
+          excludeWsId
+        );
+        finished = true;
+        if (!res.headersSent) res.json(finalInfo);
+      } finally {
+        // Idempotent: a no-op once the upload committed above.
+        releaseQuota();
+      }
     });
 
     req.pipe(busboy);
@@ -300,20 +382,26 @@ class FileService {
     const pad = this.store.findPadById(file.padId);
     if (!pad) throw NotFoundError('Pad not found');
 
-    // Permission check
+    // Permission check — ownership is the primary gate.
+    //
+    // The old rule short-circuited on "pad is public" and then ignored
+    // ownership entirely. That was written for a single-user local notepad; on
+    // a public deployment it means any self-registered identity can delete
+    // anyone else's file, and registration is open to anyone
+    // (POST /api/auth/register). User codes are persisted in SQLite and the
+    // session cookie lives 30 days, so identity is not actually ephemeral —
+    // ownership is a reliable gate.
     const padIsPublic = isPublicPad(pad);
-    if (padIsPublic && userId) {
-      // Public pad (no owner, no creator): any authenticated user may delete
-      // files. Ownership is intentionally ignored — this is a single-user
-      // local notepad, and file ownership is otherwise scattered across the
-      // ephemeral auto-registered identities created on each restart, leaving
-      // the user unable to delete their own older files.
-    } else if (file.ownerUserId) {
+    if (file.ownerUserId) {
       if (userId !== file.ownerUserId && !isAdminUser) {
         if (!this.canManagePad(userId, isAdminUser, pad)) {
           throw ForbiddenError('Access denied');
         }
       }
+    } else if (padIsPublic && userId) {
+      // Unowned file on a public pad (legacy / guest upload): any
+      // authenticated user may remove it. Owned pads never produce unowned
+      // files, so this does not weaken private-pad safety.
     } else {
       // Unowned file (e.g. uploaded by a guest to a public pad). The route
       // already rejects anonymous deletions of unowned files with 401, so here
@@ -325,9 +413,9 @@ class FileService {
     }
 
     this.store.removeFile(fileId);
-    try {
-      fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
-    } catch {}
+    // Awaited so the response reflects the file actually being gone; async
+    // unlink instead of unlinkSync keeps disk I/O off the event loop.
+    await safeUnlink(path.join(this.store.FILES_DIR, file.filename));
     this.broadcast.toPad(
       file.padId,
       { type: 'file-deleted', padId: file.padId, fileId },
@@ -345,28 +433,36 @@ class FileService {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');
 
-    // On a public pad (no owner, no creator) any authenticated user may clear
-    // all files, consistent with single-file deletion. Otherwise only a pad
-    // manager (owner/admin) may clear. Anonymous users are always rejected.
-    const canClear = isPublicPad(pad)
-      ? !!userId || isAdminUser
-      : this.canManagePad(userId, isAdminUser, pad);
-    if (!canClear) {
+    const padIsPublic = isPublicPad(pad);
+    if (!padIsPublic) {
+      // Owned pad: only a pad manager (owner/admin) may clear.
+      if (!this.canManagePad(userId, isAdminUser, pad)) {
+        throw ForbiddenError('Access denied');
+      }
+    } else if (!userId && !isAdminUser) {
       throw ForbiddenError('Access denied');
     }
 
-    const toDelete = this.store.findAllFiles().filter((f) => f.padId === padId);
-    for (const file of toDelete) {
-      try {
-        fs.unlinkSync(path.join(this.store.FILES_DIR, file.filename));
-      } catch {}
+    // A public pad has no owner who could authorize a bulk delete, so scope
+    // the wipe to the caller's own files (plus unowned legacy ones). Letting
+    // any authenticated identity clear the whole pad turned one registration
+    // into a way to destroy every other user's uploads.
+    let toDelete = this.store.findAllFiles().filter((f) => f.padId === padId);
+    if (padIsPublic && !isAdminUser) {
+      toDelete = toDelete.filter((f) => !f.ownerUserId || f.ownerUserId === userId);
     }
+    // Remove DB rows first so a crash between DB and disk leaves orphan
+    // files (harmless) rather than orphan DB rows pointing to missing files.
     if (toDelete.length > 0) {
       this.store.removeFilesMany(toDelete.map((f) => f.id));
     }
     for (const file of toDelete) {
       this.broadcast.toPad(padId, { type: 'file-deleted', padId, fileId: file.id }, excludeWsId);
     }
+    // Disk cleanup after DB is consistent; safeUnlink swallows ENOENT.
+    await Promise.all(
+      toDelete.map((file) => safeUnlink(path.join(this.store.FILES_DIR, file.filename)))
+    );
     return { ok: true, cleared: toDelete.length };
   }
 }

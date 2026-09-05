@@ -16,7 +16,10 @@ export async function fetchPadContent(padId) {
 export async function updatePadText(padId, text, wsId, baseVersion) {
   const headers = padAuthHeaders(padId, { 'Content-Type': 'application/json' });
   const body = { text, _wsId: wsId };
-  if (baseVersion != null) body.baseVersion = baseVersion;
+  // Always sent: the server rejects a full-text write that declares no base
+  // version, so a conditional here would silently turn an unsynced pad into a
+  // permanent 409. `text-sync` keeps textVersion numeric from pad load onward.
+  body.baseVersion = baseVersion ?? 0;
   const res = await fetch(`/api/pads/${padId}/text`, {
     method: 'PUT',
     headers,
@@ -77,6 +80,72 @@ export async function unlockPadApi(padId, password) {
     throw new Error(data.error || 'Wrong password');
   }
   return res.json();
+}
+
+// --- Write-access gate API ---
+
+export async function fetchWriteStatus() {
+  const res = await fetch('/api/write-access/status');
+  return res.json();
+}
+
+export async function redeemPassphraseApi(passphrase) {
+  const res = await fetch('/api/write-access/redeem', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ passphrase }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || 'Failed');
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+export async function releaseWriteAccessApi() {
+  const res = await fetch('/api/write-access/release', { method: 'DELETE' });
+  return res.ok;
+}
+
+export async function updateProfileApi(displayName) {
+  const res = await fetch('/api/auth/me', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ displayName: displayName ?? null }),
+  });
+  if (!res.ok) throw new Error('Failed to update profile');
+  return res.json();
+}
+
+// --- Admin member management (X-Admin-Token header) ---
+
+export async function fetchMembersApi(adminToken) {
+  const res = await fetch('/api/members', { headers: { 'X-Admin-Token': adminToken } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Admin access denied');
+  return data.members;
+}
+
+export async function grantMemberWriteApi(code, adminToken) {
+  const res = await fetch(`/api/members/${code}/write`, {
+    method: 'POST',
+    headers: { 'X-Admin-Token': adminToken },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Grant failed');
+  return data.grant;
+}
+
+export async function revokeMemberWriteApi(code, adminToken) {
+  const res = await fetch(`/api/members/${code}/write`, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Token': adminToken },
+  });
+  if (!res.ok) throw new Error('Revoke failed');
+  return true;
 }
 
 // --- File API ---

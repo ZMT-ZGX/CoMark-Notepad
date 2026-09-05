@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>CoMark-Notepad</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>">
-  <link rel="stylesheet" href="style.css?v=15">
+  <link rel="stylesheet" href="style.css?v=17">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
 </head>
@@ -34,10 +34,21 @@
       <button id="pad-lock-btn" class="pad-lock-btn" title="Set password" hidden>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       </button>
+      <button id="members-btn" class="pad-lock-btn" title="成员管理（管理员）">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </button>
+      <button id="profile-btn" class="pad-lock-btn" title="设置昵称">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      </button>
+      <div id="write-access-chip" class="write-access-chip" hidden>
+        <span id="write-access-meta" class="write-access-meta"></span>
+        <button id="write-access-release" class="write-access-link" title="主动放弃当前写权限">放弃写权限</button>
+      </div>
       <div id="online-badge" class="online-badge" title="Online in this pad">
         <span class="online-dot"></span>
         <span id="online-count">1</span>
       </div>
+      <div id="presence-list" class="presence-list" aria-live="polite"></div>
       <div id="status" class="status offline" title="Disconnected"></div>
       <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
         <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
@@ -50,7 +61,7 @@
     <div class="notepad-card">
       <textarea id="text-input" data-testid="editor" placeholder="Start typing..." spellcheck="false"></textarea>
       <div class="notepad-footer">
-        <span id="text-stats" class="text-stats">0 chars · 1 line</span>
+        <span id="text-stats" class="text-stats">0 字 · 1 行</span>
         <button id="export-btn" class="export-btn" title="Export as Markdown">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Export
@@ -156,6 +167,50 @@
     </div>
   </div>
 
+  <!-- Write Access Modal (gated deployments: redeem a passphrase to edit) -->
+  <div id="write-access-modal" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <h3>解锁编辑权限</h3>
+      <p class="modal-desc">此 Pad 为只读模式，输入口令可获得 7 天编辑权限（使用中自动续期）。</p>
+      <input id="write-access-passphrase" type="password" placeholder="输入口令" autocomplete="off">
+      <div class="modal-error" id="write-access-error" hidden></div>
+      <div class="modal-actions">
+        <button class="modal-btn cancel" id="write-access-cancel">取消</button>
+        <button class="modal-btn confirm" id="write-access-submit">解锁</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Profile Modal (set display name so the team knows who's who) -->
+  <div id="profile-modal" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <h3>设置昵称</h3>
+      <p class="modal-desc">你的昵称会显示在成员列表与在线成员中。</p>
+      <input id="profile-name" type="text" placeholder="你的昵称" maxlength="64">
+      <div class="modal-error" id="profile-error" hidden></div>
+      <div class="modal-actions">
+        <button class="modal-btn cancel" id="profile-cancel">取消</button>
+        <button class="modal-btn confirm" id="profile-submit">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Members Modal (admin: grant/revoke permanent write access) -->
+  <div id="members-modal" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <h3>成员管理</h3>
+      <p class="modal-desc">授予成员永久写权限（无需口令），或撤销权限。需要管理员令牌。</p>
+      <div class="members-token-row">
+        <input id="members-admin-token" type="password" placeholder="管理员令牌（X-Admin-Token）" autocomplete="off">
+        <button class="modal-btn confirm" id="members-save-token">加载</button>
+      </div>
+      <ul id="members-list" class="members-list"></ul>
+      <div class="modal-actions">
+        <button class="modal-btn cancel" id="members-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Upload Confirm Modal -->
   <div id="upload-confirm-modal" class="modal-overlay" hidden>
     <div class="modal-card upload-confirm-card">
@@ -195,19 +250,22 @@
   </div>
 
   <div id="offline-banner" class="offline-banner" hidden>网络已断开，正在本地保存...</div>
-  <div id="search-bar" class="search-bar" hidden>
-  <div class="search-input-wrap">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-    <input id="search-input" type="text" placeholder="Search pads..." autocomplete="off">
-    <button id="search-close" class="search-close" type="button">×</button>
+  <div id="write-access-banner" class="write-access-banner" hidden>
+    只读模式 · <button id="write-access-open-btn" class="write-access-link">输入口令解锁编辑</button>
   </div>
-  <div id="search-results" class="search-results"></div>
-</div>
+  <div id="search-bar" class="search-bar" hidden>
+    <div class="search-input-wrap">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="search-input" type="text" placeholder="Search pads..." autocomplete="off">
+      <button id="search-close" class="search-close" type="button">×</button>
+    </div>
+    <div id="search-results" class="search-results"></div>
+  </div>
 <script src="vendor/diff_match_patch.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hotkeys-js@3.13.15/dist/hotkeys.min.js" integrity="sha384-/wcmNn82EKPqidpArUUINSxpunohWPJ9y9sn+NTHmAyzY4Hu62pWvcle5xbmfMwh" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/alloyfinger@0.1.16/alloy_finger.js" integrity="sha384-A3Ep90ExH2Irq6NS/4PLrgTj1sYbFu6A73TkstI45OfXSNqcyFAsaWjU4jYXh32v" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js" integrity="sha384-Ic7KEGROu37YaruU6NyiYeib7UhjFyDZQ5fzBAji965L75T/4LGk5nzwMEjNGexs" crossorigin="anonymous"></script>
-  <script type="module" src="app.js?v=17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.3.0/dist/purify.min.js" integrity="sha384-+qi1h9Ene5uYXijovnRnDpm2TZiNyVFgYjKIqjw6id8zLdWYt+tCPG9/1u6yLaNj" crossorigin="anonymous"></script>
+  <script type="module" src="app.js?v=19"></script>
 </body>
 </html>

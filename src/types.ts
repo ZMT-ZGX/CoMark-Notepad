@@ -36,6 +36,30 @@ export interface FileInfo {
 export interface User {
   code: string;
   createdAt: number;
+  displayName: string | null;
+}
+
+export interface WriteAccessStatus {
+  allowed: boolean;
+  // 'open' — the gate is off entirely (LAN / single-user installs).
+  // 'passphrase' | 'admin' — an active grant backs this decision.
+  source: 'open' | 'passphrase' | 'admin' | null;
+  expiresAt: number | null;
+  permanent: boolean;
+  // Whole days remaining; null when there is no expiry or no access.
+  daysRemaining: number | null;
+}
+
+// Write-access grant. Bound to a user code (not a cookie) so an admin can
+// list, grant and revoke it server-side. expiresAt === null means permanent.
+export interface WriteGrant {
+  userCode: string;
+  // 'passphrase' — redeemed a time-limited code; 'admin' — granted by an admin.
+  source: 'passphrase' | 'admin';
+  grantedAt: number;
+  expiresAt: number | null;
+  lastUsedAt: number | null;
+  grantedBy: string | null;
 }
 
 export interface Invitation {
@@ -74,21 +98,28 @@ export interface WsTextUpdate {
   textVersion: number;
 }
 
+// Broadcast frame for remote edits. Carries the diff only — the receiver
+// reconstructs the body by applying `data` to its shadow; a receiver whose
+// shadow can't take the patch resyncs over HTTP (GET pad text). Sending the
+// authoritative body alongside the diff doubled outbound bytes per keystroke
+// for a fallback the failure path already covers.
 export interface WsPatch {
   type: 'patch';
   padId: number;
   data: string;
-  text?: string;
   textVersion: number;
   senderId: string | null;
   operationId?: string;
   baseVersion?: number;
 }
 
+// Sender-only confirmation. Because the server applies a patch only when the
+// client-supplied baseVersion matches its current textVersion, an ack implies
+// the server body now equals the text the client sent — so the ack carries no
+// body. `seq` lets the client match the ack to its single in-flight op.
 export interface WsPatchAck {
   type: 'patch-ack';
   textVersion: number;
-  text?: string;
   seq?: number;
 }
 
@@ -134,6 +165,26 @@ export interface WsOnlineCount {
   count: number;
 }
 
+// Lightweight presence relay: the server never interprets presence state, it
+// just rebroadcasts it to the pad (minus the sender) and announces removal on
+// disconnect. `gone` frames have no user-supplied fields. Clients prune stale
+// entries by timestamp, so a missed `gone` self-heals.
+export interface WsPresence {
+  type: 'presence';
+  padId: number;
+  wsId: string;
+  name?: string;
+  active?: boolean;
+  gone?: boolean;
+}
+
+// Server → all existing pad clients when a new client joins, so the newcomer
+// can be greeted with an immediate presence snapshot from everyone else.
+export interface WsPresenceRequest {
+  type: 'presence-request';
+  padId: number;
+}
+
 export interface WsHello {
   type: 'hello';
   wsId: string;
@@ -152,6 +203,8 @@ export type WsMessage =
   | WsPadDeleted
   | WsPadUpdated
   | WsOnlineCount
+  | WsPresence
+  | WsPresenceRequest
   | WsHello;
 
 export type PadMeta = Pick<Pad, 'id' | 'createdAt'> & {
@@ -184,6 +237,9 @@ export interface CoMarkWebSocket extends WebSocket {
   // Per-connection patch rate-limit state (fixed window). See ws/index.ts.
   patchWindowStart: number;
   patchCount: number;
+  // Timestamp of the last relayed presence frame — throttles presence
+  // rebroadcast per connection so a misbehaving client can't flood the room.
+  lastPresenceSent: number;
 }
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -209,6 +265,7 @@ export interface AppConfig {
   MAX_WS_CONNECTIONS_PER_IP: number;
   WS_PATCH_WINDOW_MS: number;
   MAX_WS_PATCHES_PER_WINDOW: number;
+  FTS_SYNC_DEBOUNCE_MS: number;
   CONVERTIBLE_EXTS: string[];
   CONVERT_FEATURES: Record<string, boolean>;
   isProduction: boolean;
@@ -216,6 +273,10 @@ export interface AppConfig {
   SESSION_TOKEN_TTL_DAYS: number;
   PUBLIC_ORIGIN: string;
   cookieFlags: string;
+  WRITE_ACCESS_MODE: 'open' | 'gated';
+  WRITE_PASSPHRASES: string[];
+  WRITE_GRANT_TTL_DAYS: number;
+  WRITE_GRANT_RENEW_THRESHOLD_DAYS: number;
 }
 
 // ── Data Store interface ────────────────────────────────────────────
@@ -240,6 +301,7 @@ export interface DataStore {
   findFileById(id: string): FileInfo | undefined;
   findAllFiles(): FileInfo[];
   createFile(info: FileInfo): FileInfo;
+  sumFileBytes(ownerUserId?: string | null): number;
   removeFile(id: string): void;
   removeFilesByPadId(padId: number): void;
   removeFilesMany(ids: string[]): void;
@@ -248,6 +310,16 @@ export interface DataStore {
   // User
   userExists(code: string): boolean;
   createUser(user: User): User;
+  findUserByCode(code: string): User | undefined;
+  findAllUsers(): User[];
+  setUserDisplayName(code: string, displayName: string | null): boolean;
+
+  // Write grant
+  findWriteGrant(code: string): WriteGrant | undefined;
+  findAllWriteGrants(): WriteGrant[];
+  upsertWriteGrant(grant: WriteGrant): WriteGrant;
+  removeWriteGrant(code: string): boolean;
+  touchWriteGrant(code: string, expiresAt: number | null): void;
 
   // Invitation
   createInvitation(invite: Invitation): Invitation;
@@ -293,13 +365,19 @@ import type PadService = require('./services/padService');
 import type FileService = require('./services/fileService');
 import type InviteService = require('./services/inviteService');
 import type ConvertService = require('./services/convertService');
+import type WriteAccessServiceInstance = require('./services/writeAccessService');
+type WriteAccessService = WriteAccessServiceInstance;
 
 export interface Services {
+  // Unified data-access facade — the only object route handlers and services
+  // may touch for persistence (AGENTS.md: never reach into `db` directly).
+  store: DataStore;
   db: typeof import('./db');
   padService: PadService;
   fileService: FileService;
   inviteService: InviteService;
   convertService: ConvertService;
+  writeAccessService: WriteAccessService;
 }
 
 // ── Unlock token entry ──────────────────────────────────────────────

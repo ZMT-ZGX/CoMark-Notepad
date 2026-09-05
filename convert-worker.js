@@ -1,12 +1,18 @@
 'use strict';
 
 const { parentPort, workerData } = require('worker_threads');
+const zlib = require('zlib');
 const mammoth = require('mammoth');
 const { PDFParse } = require('pdf-parse');
 const TurndownService = require('turndown');
 const { gfm } = require('@joplin/turndown-plugin-gfm');
 const readExcelFile = require('read-excel-file/node');
 const AdmZip = require('adm-zip');
+
+// CONVERT_MAX_BYTES, passed in by convertService so the archive caps move
+// with the configured upload/convert ceiling instead of a hardcoded constant.
+const CONFIGURED_MAX_BYTES =
+  Number(workerData && workerData.maxBytes) > 0 ? Number(workerData.maxBytes) : 104857600;
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
 const TEXT_DECODER = new TextDecoder('utf-8', { fatal: false });
@@ -280,10 +286,17 @@ function escapeTableCell(value) {
   return text.replace(/\r?\n/g, '<br>').replace(/\|/g, '\\|').trim();
 }
 
-function rowsToMarkdownTable(rows) {
-  const cleaned = rows
-    .map(row => row.map(escapeTableCell))
-    .filter(row => row.some(cell => cell.length > 0));
+function rowsToMarkdownTable(rows, { keepBlankRows = false } = {}) {
+  const cleaned = rows.map(row => row.map(escapeTableCell));
+  // Blank-row policy: the shared table builder drops fully-blank rows (XLSX /
+  // PPTX export artifacts). CSV callers pass keepBlankRows instead — they trim
+  // OUTER blank rows and KEEP interior ones as empty table rows (the
+  // markitdown#2303 policy; a blank CSV line may be part of the data).
+  if (!keepBlankRows) {
+    for (let i = cleaned.length - 1; i >= 0; i--) {
+      if (!cleaned[i].some(cell => cell.length > 0)) cleaned.splice(i, 1);
+    }
+  }
   if (cleaned.length === 0) return '';
 
   const width = Math.max(...cleaned.map(row => row.length));
@@ -347,6 +360,24 @@ function fenced(language, content) {
   return `\`\`\`${language}\n${content.trim()}\n\`\`\``;
 }
 
+// Excel and other tools prepend a UTF-8 BOM to CSV exports; strip it so it
+// does not end up inside the first header cell. (Synced from markitdown#2303.)
+function stripUtf8Bom(text) {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+// Remove blank rows from the beginning and end, and immediately after the
+// header, in place. Interior blank rows are KEPT — they render as empty table
+// rows and may be part of the data. Same policy as markitdown#2303. A row is
+// blank when no cell is non-empty; parseCsv yields `['']`-shaped rows for
+// blank input lines, Python csv.reader yields `[]` — both are blank here.
+function trimOuterBlankRows(rows) {
+  const isBlank = row => !row.some(cell => String(cell).length > 0);
+  while (rows.length > 0 && isBlank(rows[0])) rows.shift();
+  while (rows.length > 1 && isBlank(rows[1])) rows.splice(1, 1);
+  while (rows.length > 0 && isBlank(rows[rows.length - 1])) rows.pop();
+}
+
 // ── OOXML / PPTX helpers ────────────────────────────────────────────────────
 
 function extractTexts(xml) {
@@ -394,12 +425,150 @@ async function convertPdf(buffer) {
   }
 }
 
+// ── Archive bomb guard ─────────────────────────────────────────────────────
+//
+// OOXML files (.docx/.xlsx/.pptx) are ZIP containers, and the parse libraries
+// decompress entries straight into memory — read-excel-file does it inside a
+// nested worker (worker-f) this process holds no handle on. That memory is
+// ArrayBuffer-backed external memory, so `resourceLimits` does NOT bound it:
+// an OOM here kills the whole container, not just the offending worker.
+//
+// The uncompressed sizes recorded in the central directory are
+// attacker-controlled and can lie, so a single cheap pre-flight can never be
+// sufficient on its own. Two layers:
+//
+//   1. Declared-size pre-flight — central-directory uncompressed sizes are
+//      capped per-entry and in total, with a compression-ratio check. Cheap:
+//      getEntries() parses only the central directory, no decompression.
+//   2. Actual-decompression verification — every entry is inflated through a
+//      streaming pipe whose cumulative output is capped; chunks are counted
+//      and discarded, never materialized. A declaration that lies about its
+//      sizes is caught the moment real output crosses the cap, so the
+//      libraries' later, un-instrumented decompression can never exceed what
+//      we already measured.
+//
+// The cap is CONVERT_MAX_BYTES (workerData.maxBytes). Cost: OOXML archives
+// are decompressed once for verification and once for parsing — acceptable
+// inside a worker thread with a 60s timeout.
+const MAX_ARCHIVE_ENTRIES = 5000;
+const MAX_ENTRY_COMPRESSION_RATIO = 200;
+const MAX_ENTRY_UNCOMPRESSED_BYTES = CONFIGURED_MAX_BYTES;
+const MAX_TOTAL_UNCOMPRESSED_BYTES = CONFIGURED_MAX_BYTES;
+
+// ZIP local file header: fixed part is 30 bytes; data begins after the
+// variable-length filename + extra fields, whose lengths are recorded in the
+// header itself. Hardcoded instead of deep-requiring adm-zip internals.
+const LOCHDR = 30;
+const LOCSIG = 0x04034b50; // "PK\003\004"
+const METHOD_STORED = 0;
+const METHOD_DEFLATE = 8;
+
+function localDataStart(buf, offset) {
+  if (offset < 0 || offset + LOCHDR > buf.length) return null;
+  if (buf.readUInt32LE(offset) !== LOCSIG) return null;
+  const fnameLen = buf.readUInt16LE(offset + 26);
+  const extraLen = buf.readUInt16LE(offset + 28);
+  return offset + LOCHDR + fnameLen + extraLen;
+}
+
+/**
+ * Stream-inflate raw deflate data and count the output, discarding chunks.
+ * Resolves with the real decompressed byte count; rejects with a
+ * CONVERSION_INPUT_ERROR the moment output crosses `cap` — nothing is
+ * materialized, so memory stays bounded regardless of what the entry
+ * declared.
+ */
+function inflateRawCount(raw, cap) {
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    let settled = false;
+    const inflate = zlib.createInflateRaw();
+    inflate.on('data', (chunk) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > cap) {
+        settled = true;
+        inflate.destroy();
+        reject(
+          conversionInputError(`archive entry decompresses beyond ${cap} bytes`)
+        );
+      }
+    });
+    inflate.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(total);
+    });
+    inflate.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(conversionInputError(`corrupt archive data: ${err.message}`));
+    });
+    inflate.end(raw);
+  });
+}
+
+async function assertSafeArchive(buffer, label) {
+  let zip;
+  try {
+    zip = new AdmZip(Buffer.from(buffer));
+  } catch {
+    throw conversionInputError(`${label}: not a readable ZIP archive`);
+  }
+  const buf = Buffer.from(buffer);
+  const entries = zip.getEntries();
+  if (entries.length > MAX_ARCHIVE_ENTRIES) {
+    throw conversionInputError(`${label}: too many archive entries (${entries.length})`);
+  }
+  let total = 0;
+  for (const e of entries) {
+    const declared = Number(e.header && e.header.size) || 0;
+    const compressed = Number(e.header && e.header.compressedSize) || 0;
+
+    // Layer 1 — declared sizes (cheap, no decompression).
+    if (declared > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+      throw conversionInputError(`${label}: entry declares ${declared} uncompressed bytes`);
+    }
+    if (declared && compressed && declared / compressed > MAX_ENTRY_COMPRESSION_RATIO) {
+      throw conversionInputError(`${label}: entry has an implausible compression ratio`);
+    }
+    if (e.header.encrypted) {
+      throw conversionInputError(`${label}: encrypted archive entries are not supported`);
+    }
+
+    // Layer 2 — measure the real size; declarations can lie.
+    if (!compressed) continue; // directory or empty entry
+    const start = localDataStart(buf, Number(e.header.offset));
+    if (start == null) {
+      throw conversionInputError(`${label}: corrupt local file header`);
+    }
+    const raw = buf.subarray(start, start + compressed);
+    const method = Number(e.header.method);
+    let real;
+    if (method === METHOD_STORED) {
+      real = raw.length;
+    } else if (method === METHOD_DEFLATE) {
+      real = await inflateRawCount(raw, MAX_ENTRY_UNCOMPRESSED_BYTES);
+    } else {
+      throw conversionInputError(`${label}: unsupported compression method ${method}`);
+    }
+    total += real;
+    if (total > MAX_TOTAL_UNCOMPRESSED_BYTES) {
+      throw conversionInputError(
+        `${label}: archive decompresses beyond ${MAX_TOTAL_UNCOMPRESSED_BYTES} bytes in total`
+      );
+    }
+  }
+}
+
 async function convertDocx(buffer) {
+  await assertSafeArchive(buffer, 'DOCX');
   const result = await mammoth.convertToHtml({ buffer: Buffer.from(buffer) });
   return htmlToMarkdown(result.value);
 }
 
 async function convertXlsx(buffer) {
+  await assertSafeArchive(buffer, 'XLSX');
   const sheetsResult = await readExcelFile(Buffer.from(buffer), { sheet: 'all' });
   return sheetsResult
     .map(({ sheet, data }) => {
@@ -411,6 +580,7 @@ async function convertXlsx(buffer) {
 }
 
 async function convertPptx(buffer) {
+  await assertSafeArchive(buffer, 'PPTX');
   const zip = new AdmZip(Buffer.from(buffer));
   const entries = zip.getEntries();
 
@@ -606,7 +776,14 @@ async function convert(buffer, ext, mimeType, originalName) {
   const text = () => decodeText(buffer);
 
   if (['.txt', '.text', '.log'].includes(effectiveExt)) return text();
-  if (effectiveExt === '.csv') return rowsToMarkdownTable(parseCsv(text()));
+  if (effectiveExt === '.csv') {
+    // Synced from markitdown#2303: strip the UTF-8 BOM, trim outer blank rows
+    // (and the one right after the header), and KEEP interior blank rows as
+    // empty table rows.
+    const csvRows = parseCsv(stripUtf8Bom(text()));
+    trimOuterBlankRows(csvRows);
+    return rowsToMarkdownTable(csvRows, { keepBlankRows: true });
+  }
   if (effectiveExt === '.html') return htmlToMarkdown(text());
   if (effectiveExt === '.json') {
     try {
@@ -623,11 +800,11 @@ async function convert(buffer, ext, mimeType, originalName) {
   }
   if (effectiveExt === '.docx') {
     try { return await convertDocx(buffer); }
-    catch (e) { throw conversionInputError(`DOCX conversion failed: ${e.message}`); }
+    catch (e) { if (e.code === 'CONVERSION_INPUT_ERROR') throw e; throw conversionInputError(`DOCX conversion failed: ${e.message}`); }
   }
   if (effectiveExt === '.xlsx') {
     try { return await convertXlsx(buffer); }
-    catch (e) { throw conversionInputError(`XLSX conversion failed: ${e.message}`); }
+    catch (e) { if (e.code === 'CONVERSION_INPUT_ERROR') throw e; throw conversionInputError(`XLSX conversion failed: ${e.message}`); }
   }
   if (effectiveExt === '.pptx') {
     try { return await convertPptx(buffer); }

@@ -7,6 +7,7 @@ db.bak.pre-phase5/
 *.log
 .logs/
 .qoder/
+.codebuddy/
 .env
 .env.*
 !.env.example

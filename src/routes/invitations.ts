@@ -7,6 +7,7 @@ const { checkOrigin } = require('../middlewares/security');
 const { UnauthorizedError } = require('../utils/errors');
 const { validate } = require('../middlewares/validate');
 const { CreateInvitationSchema, RedeemInvitationSchema } = require('../validators/invitations');
+const { requireWriteAccess } = require('../middlewares/writeAccess');
 
 const redeemLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -26,14 +27,16 @@ const inviteCreateLimiter = rateLimit({
   message: { error: 'Too many invitations created.' },
 });
 
-function createRouter(inviteService: any) {
+function createRouter(inviteService: any, writeAccessService: any) {
   const router = express.Router();
+  const writeGate = requireWriteAccess(writeAccessService);
 
   // Create invitation
   router.post(
     '/',
     inviteCreateLimiter,
     checkOrigin,
+    writeGate,
     validate(CreateInvitationSchema),
     async (req: any, res: any, next: any) => {
       try {
@@ -48,7 +51,8 @@ function createRouter(inviteService: any) {
     }
   );
 
-  // Redeem invitation
+  // Redeem invitation — NOT behind writeGate so that gated-mode users
+  // without a write_grant can still redeem invitations to obtain access.
   router.post(
     '/redeem',
     redeemLimiter,
@@ -79,7 +83,7 @@ function createRouter(inviteService: any) {
   });
 
   // Delete invitation
-  router.delete('/:token', checkOrigin, async (req: any, res: any, next: any) => {
+  router.delete('/:token', checkOrigin, writeGate, async (req: any, res: any, next: any) => {
     try {
       if (!req.userId) throw UnauthorizedError('Authentication required');
       const result = await inviteService.delete(req.userId, req.params.token);

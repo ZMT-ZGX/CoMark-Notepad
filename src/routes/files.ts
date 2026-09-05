@@ -8,6 +8,7 @@ const { contentDisposition } = require('../utils/file');
 const { UnauthorizedError } = require('../utils/errors');
 const { validate } = require('../middlewares/validate');
 const { ClearFilesSchema, DeleteFileSchema } = require('../validators/files');
+const { requireWriteAccess } = require('../middlewares/writeAccess');
 
 const clearFilesLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -17,8 +18,9 @@ const clearFilesLimiter = rateLimit({
   message: { error: 'Too many clear-all attempts.' },
 });
 
-function createRouter(fileService: any, padService: any) {
+function createRouter(fileService: any, padService: any, writeAccessService: any) {
   const router = express.Router();
+  const writeGate = requireWriteAccess(writeAccessService);
   const filePadUnlock = requirePadUnlock(padService, (req: any) => {
     const f = fileService.getFileById(req.params.id);
     return f ? f.padId : NaN;
@@ -57,6 +59,7 @@ function createRouter(fileService: any, padService: any) {
   router.delete(
     '/:id',
     checkOrigin,
+    writeGate,
     filePadUnlock,
     validate(DeleteFileSchema),
     async (req: any, res: any, next: any) => {
@@ -89,6 +92,7 @@ function createRouter(fileService: any, padService: any) {
     '/',
     clearFilesLimiter,
     checkOrigin,
+    writeGate,
     clearPadUnlock,
     validate(ClearFilesSchema),
     async (req: any, res: any, next: any) => {

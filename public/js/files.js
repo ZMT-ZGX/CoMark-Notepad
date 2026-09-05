@@ -5,17 +5,58 @@ import {
 import { deleteFileApi, convertFileApi, uploadWithProgress } from './server.js';
 import { refreshPads } from './pads.js';
 
-// --- Text Stats ---
+// --- Text Stats (Memos / SiYuan style) ---
 
 const textarea = () => $('#text-input');
+
+// CJK counted per character, Latin counted per word — the convention used by
+// Memos / SiYuan / VSCode, so "字数" matches what a Chinese writer expects
+// for a mixed-language document. Reading speed is weighted separately
+// (400 字/min CJK vs 200 wpm Latin) so the estimate stays sane per language.
+const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g;
+const LATIN_RE = /[A-Za-z0-9_'-]+/g;
+
+function countText(text) {
+  const cjk = (text.match(CJK_RE) || []).length;
+  const latin = (text.match(LATIN_RE) || []).length;
+  return {
+    words: cjk + latin,
+    minutes: Math.round(cjk / 400 + latin / 200),
+  };
+}
 
 export function updateTextStats() {
   const stats = $('#text-stats');
   if (!stats) return;
-  const text = textarea().value;
-  const chars = text.length;
+  const ta = textarea();
+  const text = ta.value;
+  const { words, minutes } = countText(text);
   const lines = text ? text.split('\n').length : 1;
-  stats.textContent = `${chars} char${chars !== 1 ? 's' : ''} · ${lines} line${lines !== 1 ? 's' : ''}`;
+
+  let out = words
+    ? `${words.toLocaleString()} 字 · ${lines.toLocaleString()} 行 · 约 ${Math.max(1, minutes)} 分钟`
+    : `0 字 · ${lines.toLocaleString()} 行`;
+
+  // Selection-aware: show the selected span so a writer can measure a passage.
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  if (end > start) {
+    const sel = countText(text.slice(start, end)).words;
+    out = `选中 ${sel.toLocaleString()} 字 / 共 ${out}`;
+  }
+  stats.textContent = out;
+}
+
+// Per-keystroke updates are debounced: the regex scan is O(n) and the old
+// code ran it on every `input` event. Remote patches / pastes call
+// updateTextStats() directly, so they stay immediate.
+let statsTimer = null;
+export function scheduleTextStats() {
+  if (statsTimer) return;
+  statsTimer = setTimeout(() => {
+    statsTimer = null;
+    updateTextStats();
+  }, 200);
 }
 
 // --- File Element Creation ---
@@ -75,7 +116,10 @@ function createFileElement(file) {
   const previewName = el.querySelector('.file-name.is-previewable');
   if (previewName) {
     previewName.addEventListener('click', async () => {
-      const { openMarkdownPreview } = await import('./ws.js');
+      // Preview lives in preview.js — importing it from ws.js yielded
+      // `undefined` and made the click handler throw, which silently disabled
+      // Markdown preview entirely.
+      const { openMarkdownPreview } = await import('./preview.js');
       openMarkdownPreview(file);
     });
   }

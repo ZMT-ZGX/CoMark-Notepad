@@ -14,6 +14,7 @@
 - **文件共享** — 拖拽 / 粘贴（⌘/Ctrl+V 上传剪贴板文件或截图）/ 点击上传（Busboy 流式，**100MB** 上限），支持中文文件名
 - **文件转 Markdown** — PDF / DOCX / XLSX / PPTX / HTML / CSV / TXT / JSON / XML / YAML 及 JPG / PNG / GIF 一键转换（默认 **100MB** 上限，与上传对齐）
 - **邀请制访问控制** — 三级权限（公开 / 受邀 / 管理员），HMAC Cookie 认证
+- **写权限门控**（公网部署）— `WRITE_ACCESS_MODE=gated` 下访客默认只读，输入口令获 7 天写权限（滑动续期），管理员可授予成员永久写权限（信任白名单，可撤销）。详见[写权限门控](#写权限门控)
 - **密码保护** — 单个 Pad 可独立设密；unlock token 只走 `X-Pad-Token` header / WS 首包 auth（不进 URL / access log）
 - **深色 / 浅色主题** — 跟随系统 / 手动切换，Apple 设计风格
 - **移动端适配** — iOS Safari 兼容，左右滑切 Pad，AlloyFinger 手势
@@ -50,7 +51,7 @@
 | 运行时校验 | Zod v4 |
 | 安全 | Helmet CSP · express-rate-limit · timing-safe 比较 |
 | 前端 | 原生 HTML / CSS / ES Modules（零框架）· hotkeys-js · AlloyFinger |
-| 测试 | Node.js test runner（72 个集成测试）|
+| 测试 | Node.js test runner（108 个集成测试）|
 | 工程化 | ESLint + Prettier + simple-git-hooks + GitHub Actions CI |
 
 ## 快速开始
@@ -91,6 +92,12 @@ docker compose logs -f
 完整流程（备份恢复、资源调优、安全加固、故障排查、非 Docker 的 systemd 部署）
 见 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**。
 
+同类开源项目对比（10 个项目五维横评、差距分析与 P0/P1/P2 改进路线图）
+见 **[docs/competitive-analysis.md](docs/competitive-analysis.md)**。
+
+公网团队部署（写权限门控、信任成员白名单、腾讯云清单）
+见 **[docs/public-deployment-plan.md](docs/public-deployment-plan.md)**。
+
 数据持久化在 `./data` 目录（SQLite 数据库 + 上传文件）；Docker 部署时位于
 `notepad-data` 卷中。
 
@@ -105,8 +112,15 @@ docker compose logs -f
 | `ADMIN_TOKEN` | 无 | 全局管理员令牌 |
 | `NODE_ENV` | `development` | 设为 `production` 启用严格模式 |
 | `DATA_DIR` | `./data` | 数据目录 |
-| `FILE_TTL_HOURS` | `72` | 文件自动过期时间 |
-| `CONVERT_MAX_BYTES` | `104857600` | 转 Markdown 的文件大小上限（100MB）|
+| `FILE_TTL_HOURS` | `72` | 过期文件回收时限（仅回收未被任何 Pad 正文引用的文件）|
+| `MAX_STORAGE_BYTES` | `2GB` | 实例聚合存储上限（配额在 rename 前检查，被拒上传不留盘）|
+| `MAX_STORAGE_BYTES_PER_USER` | `512MB` | 按账户存储上限 |
+| `FTS_SYNC_DEBOUNCE_MS` | `1200` | 搜索索引（FTS）按 Pad 节流刷新的窗口；正文落盘仍为同步，仅索引可滞后 |
+| `WRITE_ACCESS_MODE` | `open` | `gated` = 访客只读，需写权限才可编辑（公网部署建议）|
+| `WRITE_PASSPHRASES` | 无 | 逗号分隔的写权限口令，格式 `<phrase>[:<days>]`（省略天数用 `WRITE_GRANT_TTL_DAYS`）|
+| `WRITE_GRANT_TTL_DAYS` | `7` | 口令兑换的写权限有效期（滑动续期）|
+| `WS_ALLOW_NO_ORIGIN` | `false` | `true` 时放行不带 Origin 头的 WS 客户端（非浏览器脚本）；默认 fail-closed |
+| `CONVERT_MAX_BYTES` | `104857600` | 转 Markdown 的文件大小上限（100MB）；同时作为归档解压总上限 |
 | `CONVERT_TIMEOUT_MS` | `60000` | 转换超时（ms）|
 
 ## 协同模型
@@ -124,8 +138,10 @@ docker compose logs -f
 ```
 
 - **客户端**只发 diff patch（不传全文），带宽极省
-- **服务端**串行应用 patch，保存后广播给房间其他客户端
+- **服务端**串行应用 patch（baseVersion 不符直接 nack），广播帧**仅含 diff**——接收方对本地 shadow `patch_apply` 重建正文，失败自动走 HTTP 重同步；ack 同样只回版本号，一次击键不再序列化两份全文档
 - **接收方**用 `dmp.patch_apply` 合并，**光标位置不跳动**
+- **正文落盘同步**（崩溃不丢字），但 FTS trigram 搜索索引按 Pad **节流刷新**（默认 1.2s），启动时全量对账
+- **在线成员**（presence）：头部彩色芯片显示谁在房间里、谁正在输入；服务端只转发，不做存储
 - **断网时**patch 暂存 `localStorage`（key 按 padId 隔离），`onopen` 时按序发送
 
 > ⚠️ 当前实现**没有 OT/CRDT**：两人在同一位置同时插入时，后到的 patch 可能失败，需要重新同步基线。Google Docs 级别的无冲突编辑需要引入 Yjs / Automerge。
@@ -137,6 +153,10 @@ docker compose logs -f
 私人 Pad（ownerUserId=X）       →  用户X + 被X邀请的用户
 全局管理员（ADMIN_TOKEN）     →  所有区域的完全访问权
 ```
+
+> **新建 Pad 默认是私有的**（归属创建者）。仅老版本的 Pad #1 是公开的（`owner_user_id=NULL`）；
+> 全新部署以零 Pad 启动，不再播种公开 Pad #1——因为公网部署下它对任何注册者可见。
+> 旧库若仍有一个公开 Pad #1，建议在「成员管理」中删除或将其内容迁移到私人 Pad。
 
 | 操作 | 公开 Pad | 私人 Pad | Admin |
 |------|----------|----------|-------|
@@ -181,28 +201,46 @@ docker compose logs -f
 
 > **Unlock token**：所有需要解锁的 HTTP 路径只认请求头 `X-Pad-Token`（可逗号分隔多个）。**不要**使用 `?padToken=`——会进 access / proxy 日志。
 
+### 写权限门控
+
+公网部署设 `WRITE_ACCESS_MODE=gated` 后，访客默认只读，需持写权限才可编辑。
+
+- `GET    /api/write-access/status` — 当前用户写权限状态
+- `POST   /api/write-access/redeem` — 用口令兑换写权限（`{ passphrase }`，7 天滑动续期）
+- `DELETE /api/write-access/release` — 主动释放自己的写权限
+- `GET    /api/members` — 成员列表（`X-Admin-Token`）
+- `POST   /api/members/:code/write` — 授予成员永久写权限（`X-Admin-Token`）
+- `DELETE /api/members/:code/write` — 撤销成员写权限（`X-Admin-Token`）
+- `PATCH  /api/auth/me` — 设置昵称 `{ displayName }`
+
+> **信任成员白名单** 替代「永久后门口令」：管理员把指定成员标记为信任，该成员永久可写、无需口令，可按人撤销、可审计，无共享密钥泄露风险。
+> WebSocket 写路径每次 patch 复检写权限，失效发 `{ type:'write-denied' }` 并以关闭码 **4405** 关闭连接（与 4403 Pad 锁定、4001 速率超限风格一致）。
+
 ### WebSocket
 连接：`ws://host:port/?pad=<padId>`（session token 通过 Cookie 自动携带；锁定的 pad 需要连接后第一时间发 `{ type: 'auth', padToken }` 消息）
 
 **客户端 → 服务端**
 - `{ type: 'auth', padToken }` — 加锁 Pad 建连后首包鉴权
-- `{ type: 'patch', padId, data, seq?, operationId?, baseVersion? }` — 发送 diff patch（服务端每次写会复检 unlock token）
+- `{ type: 'patch', padId, data, seq?, operationId?, baseVersion? }` — 发送 diff patch（服务端每次写会复检 unlock token 与写权限）
 
 **服务端 → 客户端**
 - `{ type: 'hello', wsId, padId, userId }` — 连接建立（含 unlock 鉴权成功）
-- `{ type: 'patch', padId, data, textVersion, senderId }` — 远端 patch 广播
-- `{ type: 'patch-ack', textVersion, text, seq }` — 单个 patch 已成功应用
-- `{ type: 'patch-nack', padId, text, textVersion }` — 应用失败，回传权威正文（仅发送者）
+- `{ type: 'patch', padId, data, textVersion, senderId }` — 远端 patch 广播（**仅 diff**；接收方对 shadow `patch_apply` 重建正文，失败时走 HTTP 重同步）
+- `{ type: 'patch-ack', textVersion, seq }` — 单个 patch 已成功应用（**不回传正文**：baseVersion 匹配意味着服务端正文与发送方已持有文本一致）
+- `{ type: 'patch-nack', padId, text, textVersion }` — 应用失败（含 baseVersion 不匹配），回传权威正文（仅发送者）
 - `{ type: 'text-update', padId, text, textVersion }` — 全量文本快照
+- `{ type: 'presence', padId, wsId, name?, active?, gone? }` — 在线成员/编辑状态转发（服务端只转发不存储）
+- `{ type: 'presence-request', padId }` — 有新连接加入，请各客户端广播一次自己的 presence
 - `{ type: 'online-count', padId, count }` — 在线人数
 - `{ type: 'file-added' | 'file-deleted', padId, ... }` — 文件事件
 - `{ type: 'pad-created' | 'pad-updated' | 'pad-deleted', ... }` — Pad 事件
-- 关闭码 **4403** — Pad 锁定 / unlock token 失效；**4001** — patch 速率超限
+- `{ type: 'write-denied', padId, reason }` — 写权限缺失/过期（仅 gated 模式）
+- 关闭码 **4403** — Pad 锁定 / unlock token 失效；**4001** — patch 速率超限；**4405** — 写权限缺失/过期（gated 模式）
 
 ## 测试
 
 ```bash
-npm test                  # 全部测试（74 个）
+npm test                  # 全部测试（108 个）
 npm run typecheck         # TypeScript 严格检查
 npm run lint              # ESLint
 npm run test:e2e          # Playwright E2E（需先 npm run build）
@@ -218,18 +256,18 @@ collab-notepad/
 │   ├── config.ts          # 环境变量 + 常量
 │   ├── types.ts           # 核心类型 + WsMessage union
 │   ├── auth/              # session.ts · password.ts
-│   ├── middlewares/        # auth.ts · security.ts · errorHandler.ts
-│   ├── routes/            # auth · pads · files · invitations · convert · health
-│   ├── services/          # padService · fileService · inviteService · convertService
-│   ├── db/                # sqlite.ts (含 FTS5 schema + 触发器) · pads · files · users · invitations
+│   ├── middlewares/        # auth.ts · security.ts · writeAccess.ts · errorHandler.ts
+│   ├── routes/            # auth · pads · files · invitations · convert · health · writeAccess（含 members）
+│   ├── services/          # padService · fileService · inviteService · convertService · writeAccessService
+│   ├── db/                # sqlite.ts (含 FTS5 schema + 触发器) · pads · files · users · invitations · writeGrants · migrate
 │   ├── store/             # DataStore facade
 │   ├── validators/        # Zod schemas
 │   ├── utils/             # crypto · auth · errors · file · logger
-│   └── ws/                # connections · broadcast · index
+│   └── ws/                # connections · broadcast · index · handlers · validate · close
 ├── public/
 │   ├── index.html
 │   ├── js/                # ES Modules（零框架）
-│   │   ├── core.js        # state singleton
+│   │   ├── core.js        # state singleton（形状 + setter 都在这里）
 │   │   ├── text-sync.js   # patch 同步、离线队列、图片粘贴
 │   │   ├── ws.js          # WS 客户端
 │   │   ├── server.js      # HTTP API 客户端
@@ -237,6 +275,8 @@ collab-notepad/
 │   │   ├── files.js       # 文件列表
 │   │   ├── search.js      # FTS5 搜索 UI
 │   │   ├── preview.js     # Markdown 预览 + TOC
+│   │   ├── presence.js    # 在线成员芯片（纯转发）
+│   │   ├── write-access.js# 写权限 UI：只读横幅 / 可写 chip / 口令弹窗 / 成员管理
 │   │   ├── shortcuts.js   # 键盘快捷键
 │   │   ├── invitation.js  # 邀请/兑换
 │   │   ├── modals.js      # 弹窗
@@ -248,13 +288,16 @@ collab-notepad/
 │   │   └── diff_match_patch.js   # 浏览器全局（从 node_modules 包装）
 │   └── style.css
 ├── convert-worker.js      # Worker Thread 文件转换引擎
-├── tests/                 # 集成测试（72 个）
+├── tests/                 # 集成测试（108 个，共享 harness 在 tests/helpers.js）
 │   ├── identity.test.js
 │   ├── smoke.test.js
 │   ├── convert.test.js
+│   ├── write-access.test.js
+│   ├── security.test.js
+│   ├── concurrency.test.js
 │   └── e2e/               # Playwright E2E
 ├── scripts/               # 运维：deploy.sh（构建+健康检查+回滚）· backup.sh · sqlite-backup.js
-├── docs/                  # DEPLOYMENT.md（自托管运维手册）· 设计文档
+├── docs/                  # DEPLOYMENT.md（自托管运维手册）· competitive-analysis.md（竞品分析）· 设计文档
 ├── Dockerfile             # 多阶段生产镜像
 ├── docker-compose.yml     # Compose + Caddy；服务级 mem_limit / cpus
 ├── Caddyfile              # 反向代理 + 自动 HTTPS
@@ -320,6 +363,7 @@ collab-notepad/
 - **加锁门禁** — 搜索与 state 文件列表对未解锁 Pad 隐藏内容；解锁后自动 `refreshPads`
 - **WS 写复检锁** — 每次 patch 校验 `ws.unlockToken`，失效 `4403`
 - **转换上限 100MB** — `CONVERT_MAX_BYTES` 默认与上传对齐
+- **安全审计（2026-09-03）** — 见 `CHANGELOG.md [1.2.3] › 安全专项修复（S1–S8）`：`npm audit` 0 漏洞；WS 原型污染 / close-reason 崩溃修复、上传孤儿文件与 zip 炸弹防护、嵌套 worker 回收、预览 XSS + DOMPurify 版本固定、加锁 Pad 离线队列改为仅存内存、不落 `localStorage`、跨用户文件删除权限复检。回归测试 `tests/security.test.js`
 
 ### v1.2.0 (2026-09-01)
 
@@ -334,6 +378,18 @@ collab-notepad/
 - **日志增强** — 访问日志补状态码与耗时；`cookie` / `authorization` / `x-pad-token` 等敏感头自动脱敏
 
 > ⚠️ **契约变更**：`/api/health` 的 `pads` / `files` 字段移至新增的 `/api/health/ready`。存活探针不再查库（避免繁忙的 SQLite checkpoint 导致容器被误重启），就绪探针查库并在数据库不可用时返回 503。外部监控若读取这两个字段需改指就绪端点。
+
+### v1.2.3 (2026-09-05)
+
+**安全专项修复 + 同步协议瘦身 + 写权限门控落地**
+
+- **写权限门控（`WRITE_ACCESS_MODE=gated`）** — 公网部署下访客默认只读：口令兑换（7 天滑动续期）/ 信任成员白名单 / 管理员四层模型，覆盖全部 12 条写路径（11 HTTP + WS patch，失效 4405 关闭）
+- **并发控制改为强制** — 每条 patch / 整篇写入必须携带 `baseVersion`，缺失即拒绝（WS `patch-nack` / HTTP 409），不再可能靠省略字段静默覆盖并发编辑；WS 握手 fail-closed（无 Origin 需显式 `WS_ALLOW_NO_ORIGIN=true`）
+- **同步协议瘦身** — `patch-ack` 只回版本号、广播帧只含 diff（接收方按 shadow 重建），每击键带宽与序列化 CPU 大幅下降；FTS 索引从每击键全量重建改为每 Pad 节流（`FTS_SYNC_DEBOUNCE_MS`）
+- **安全专项（S1–S8）** — WS 原型链污染 / close-reason 崩溃、zip 炸弹两层防护、预览 XSS + DOMPurify 固定、加锁 Pad 离线队列仅存内存、跨用户删除复检；聚合存储配额（`MAX_STORAGE_BYTES` / `MAX_STORAGE_BYTES_PER_USER`）；`npm audit` 0 漏洞
+- **文件生命周期** — TTL 只回收未被正文引用的附件；上传 `.part` + `rename` 原子落盘
+- **在线成员 presence** — 头部彩色芯片（relay-only，服务端零存储）；昵称（`PATCH /api/auth/me`）+ 成员管理 API
+- **转换器对齐 markitdown v0.1.8b1** — CSV BOM 剥离与空白行语义同步
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 

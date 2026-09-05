@@ -13,9 +13,10 @@
  */
 
 import { state, $, showToast, getPadSync } from './core.js';
-import { updateTextStats } from './files.js';
+import { updateTextStats, scheduleTextStats } from './files.js';
 import { updatePadText } from './server.js';
 import { loadPadContent } from './pads.js';
+import { isReadOnly } from './write-access.js';
 
 const textarea = () => $('#text-input');
 
@@ -190,47 +191,23 @@ function sendPatchOverWs(patchText, sentText, padId, sync, operationId = null) {
 
 // Server confirmed the in-flight WS patch: advance the confirmed shadow, clear
 // in-flight, and pump the pipeline for any newer local edits (P1 #1).
-export function ackInflight(seq, padId = state.currentPadId, authoritativeText = null, authoritativeVersion = null) {
+//
+// The ack carries no body. The server applies a patch only when the client's
+// baseVersion matches its current textVersion, so a positive ack means the
+// server body is now byte-identical to the text this client already sent —
+// echoing that body back would serialize the whole document twice per
+// keystroke (once in the broadcast, once in the ack) for zero information.
+export function ackInflight(seq, padId = state.currentPadId, authoritativeVersion = null) {
   const sync = getPadSync(padId);
   if (!sync.inflight || sync.inflight.kind !== 'ws' || sync.inflight.seq !== seq) return;
   const inflight = sync.inflight;
-  const sentText = inflight.sentText;
   const ackVersion = typeof authoritativeVersion === 'number' ? authoritativeVersion : null;
   const isStaleAck = ackVersion !== null && ackVersion < sync.textVersion;
-  inflight.authoritativeText = typeof authoritativeText === 'string' ? authoritativeText : null;
   if (!isStaleAck) {
-    sync.lastSyncedText = inflight.authoritativeText ?? inflight.sentText;
+    sync.lastSyncedText = inflight.sentText;
     if (ackVersion !== null) sync.textVersion = Math.max(sync.textVersion, ackVersion);
   }
   sync.inflight = null;
-  if (typeof authoritativeText === 'string' && padId === state.currentPadId) {
-    const target = sync.pendingTarget;
-    const ta = textarea();
-    let nextValue;
-    if (isStaleAck) {
-      nextValue = mergePendingTarget(sync.lastSyncedText, sync);
-    } else if (target == null || target === sentText) {
-      nextValue = authoritativeText;
-    } else {
-      const dmp = getDmp();
-      if (dmp) {
-        const localPatches = dmp.patch_make(sentText, target);
-        const [merged, results] = dmp.patch_apply(localPatches, authoritativeText);
-        nextValue = results.every(Boolean) ? merged : target;
-      } else {
-        nextValue = target;
-      }
-    }
-    if (composing && document.activeElement === ta) {
-      // The op the server just confirmed was sent *before* this composition
-      // began, so the shadow advance above is already correct — `ta.value`
-      // contains that text. Only the DOM write must wait, because assigning
-      // `value` now would abort the IME.
-      return;
-    }
-    setEditorText(ta, nextValue);
-    updateTextStats();
-  }
   pump(padId);
 }
 
@@ -420,6 +397,14 @@ function queueRemoteText(text, version, sync, force = false) {
 
 function applyPendingRemoteText(padId = state.currentPadId) {
   const sync = getPadSync(padId);
+  // Replay remote patches parked during the composition, in arrival order, so
+  // the shadow reflects each one before the next is applied. applyRemotePatchNow
+  // bypasses the seenOperations guard on purpose: the parked frame was never
+  // applied, and its id was deliberately not remembered at park time.
+  while (sync.pendingRemotePatches.length > 0) {
+    const parked = sync.pendingRemotePatches.shift();
+    applyRemotePatchNow(parked.patchText, parked.version, padId, parked.operationId);
+  }
   if (!sync.pendingRemoteState) return;
   // `force` is set when the body was deferred for a reason other than focus
   // (an IME composition was in flight) — the shadow version may already have
@@ -460,7 +445,10 @@ export function applyRemoteText(text, version, padId = state.currentPadId, force
 
 /**
  * Apply a remote patch to the editor while preserving cursor position.
- * Falls back to full-text replacement if patch_apply reports failures.
+ *
+ * Patch frames carry the diff only — the body is rebuilt by applying the
+ * patch to the confirmed shadow; when that fails the editor resyncs over
+ * HTTP. Falls back to full-text replacement if patch_apply reports failures.
  */
 export function applyRemotePatch(
   patchText,
@@ -473,30 +461,24 @@ export function applyRemotePatch(
   if (operationId && sync.seenOperations.has(operationId)) return;
   if (!operationId && version <= sync.textVersion) return;
   if (typeof window.diff_match_patch !== 'function') return;
-  if (typeof authoritativeText === 'string' && version > sync.textVersion) {
-    const ta = textarea();
-    // Never write `value` mid-IME-composition: doing so aborts the composition
-    // and discards the word the user is currently spelling out. Park the
-    // authoritative body and rebase onto it at compositionend.
-    //
-    // The shadow is deliberately NOT advanced here. `ta.value` is still diffed
-    // against the old shadow, so advancing it would make the deferred merge
-    // compute an empty local delta and silently drop the remote edit.
-    if (composing && document.activeElement === ta) {
-      queueRemoteText(authoritativeText, version, sync, true);
-      rememberOperation(sync, operationId);
-      return;
-    }
-    const hadLocal = sync.pendingTarget !== null || !!sync.inflight || ta.value !== sync.lastSyncedText;
-    const mergedText = mergePendingTarget(authoritativeText, sync);
-    setEditorText(ta, mergedText);
-    sync.textVersion = Math.max(sync.textVersion, version);
-    sync.lastSyncedText = authoritativeText;
-    if (hadLocal) sync.pendingTarget = mergedText;
-    rememberOperation(sync, operationId);
-    updateTextStats();
+  const ta = textarea();
+  // Never write `value` mid-IME-composition: doing so aborts the composition
+  // and discards the word the user is currently spelling out. Park the patch
+  // and replay it at compositionend — patch frames carry no body, so unlike
+  // text-update frames they must be parked as diffs, not as parked text.
+  // A queue, not a slot: the server broadcasts in application order, so
+  // replaying in arrival order keeps each diff anchored to the shadow the
+  // previous one produced. Dropping all but the last would lose the earlier
+  // edits AND leave the survivor diffed against a stale shadow.
+  if (composing && document.activeElement === ta) {
+    sync.pendingRemotePatches.push({ patchText, version, operationId });
     return;
   }
+  applyRemotePatchNow(patchText, version, padId, operationId);
+}
+
+function applyRemotePatchNow(patchText, version, padId, operationId) {
+  const sync = getPadSync(padId);
   const dmp = getDmp();
   let patches;
   try {
@@ -510,6 +492,10 @@ export function applyRemotePatch(
   const [newText, results] = dmp.patch_apply(patches, sync.lastSyncedText);
   if (!Array.isArray(results) || results.some((r) => !r)) {
     console.warn('applyRemotePatch: patch failed to apply cleanly — resyncing from server');
+    // The HTTP snapshot carries every remote edit (the server has already
+    // applied them), so any still-parked diffs are superseded — applying
+    // them to the stale shadow would only produce garbage.
+    sync.pendingRemotePatches.length = 0;
     loadPadContent();
     return;
   }
@@ -523,7 +509,7 @@ export function applyRemotePatch(
   // will be re-sent on the next send (currentText !== shadow).
   sync.lastSyncedText = newText;
   if (hadLocal) sync.pendingTarget = mergedText;
-  rememberOperation(sync, operationId);
+  if (operationId) rememberOperation(sync, operationId);
   updateTextStats();
 }
 
@@ -584,6 +570,10 @@ export function hideOfflineBanner() {
 // --- Send path (patch over WS, HTTP fallback) ---
 
 function sendText() {
+  // Read-only mode (gated deployment, no write grant): never build a patch.
+  // The textarea is also readOnly, so this is belt-and-braces against
+  // programmatic value changes.
+  if (isReadOnly()) return;
   const sync = getPadSync(state.currentPadId);
   sync.pendingTarget = textarea().value;
   clearTimeout(state.sendTimeout);
@@ -658,6 +648,7 @@ export function flushPatchQueue(padId = state.currentPadId) {
  * embedded data URL well under that to avoid a server nack (P2 #6).
  */
 function handleImagePaste(e) {
+  if (isReadOnly()) return;
   const items = e.clipboardData?.items;
   if (!items) return;
   for (const item of items) {
@@ -711,7 +702,10 @@ function handleBeforeUnload() {
 
 export function initTextSync() {
   const ta = textarea();
-  ta.addEventListener('input', () => { sendText(); updateTextStats(); });
+  ta.addEventListener('input', () => { sendText(); scheduleTextStats(); });
+  // Selection changes refresh the "选中 N 字" counter; debounced so dragging
+  // a selection doesn't re-scan the whole document per pixel.
+  document.addEventListener('selectionchange', scheduleTextStats);
   ta.addEventListener('blur', () => {
     // Safety net: if `compositionend` never fires (IME cancelled, editor
     // hidden), stop suspending sends before applying the deferred body.

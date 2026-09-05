@@ -35,6 +35,17 @@ const MAX_PADS = 50;
 const FILE_TTL_HOURS = parsePositiveInt(process.env.FILE_TTL_HOURS, 72);
 const FILE_TTL_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h
 const CONVERT_MAX_BYTES = parsePositiveInt(process.env.CONVERT_MAX_BYTES, 100 * 1024 * 1024); // 100MB
+
+// Aggregate storage caps. The per-file ceiling above bounds ONE upload, but
+// nothing bounded the TOTAL: a single account could upload 100MB files
+// repeatedly and — because unreferenced files survive up to FILE_TTL_HOURS —
+// fill the disk, at which point SQLite writes start failing and the whole
+// instance goes down. Defaults leave ample headroom for a self-hosted team.
+const MAX_STORAGE_BYTES = parsePositiveInt(process.env.MAX_STORAGE_BYTES, 2 * 1024 * 1024 * 1024); // 2GB instance-wide
+const MAX_STORAGE_BYTES_PER_USER = parsePositiveInt(
+  process.env.MAX_STORAGE_BYTES_PER_USER,
+  512 * 1024 * 1024
+); // 512MB per account
 const CONVERT_TIMEOUT_MS = parsePositiveInt(process.env.CONVERT_TIMEOUT_MS, 60 * 1000); // 60s
 // Peak conversion memory is CONVERT_MAX_CONCURRENT x CONVERT_WORKER_HEAP_MB and
 // must fit inside the container memory limit next to the main process. Both are
@@ -52,6 +63,11 @@ const MAX_WS_CONNECTIONS_PER_IP = parsePositiveInt(process.env.MAX_WS_CONNECTION
 // (60/min); WS messages bypass Express, so we enforce an equivalent cap here.
 const WS_PATCH_WINDOW_MS = parsePositiveInt(process.env.WS_PATCH_WINDOW_MS, 60 * 1000);
 const MAX_WS_PATCHES_PER_WINDOW = parsePositiveInt(process.env.MAX_WS_PATCHES_PER_WINDOW, 120);
+// How long a pad's FTS row may lag behind its body before the throttled sync
+// refreshes the trigram index. The pads row itself is written synchronously on
+// every edit (durability is unchanged); only the expensive trigram re-tokenize
+// is deferred, so a keystroke burst costs one reindex instead of one per char.
+const FTS_SYNC_DEBOUNCE_MS = parsePositiveInt(process.env.FTS_SYNC_DEBOUNCE_MS, 1200);
 // Number of reverse-proxy hops to trust for X-Forwarded-For. Single source of
 // truth for `app.set('trust proxy', ...)`; app.ts must read it from here rather
 // than process.env so a malformed value falls back instead of silently
@@ -127,6 +143,40 @@ const SESSION_SECRET = (() => {
 })();
 
 const SESSION_TOKEN_TTL_DAYS = parsePositiveInt(process.env.SESSION_TOKEN_TTL_DAYS, 30);
+
+// ── Write access gate ────────────────────────────────────────────────
+// 'open'  — legacy behaviour: any visitor may edit. Correct for LAN / single
+//           user installs, and keeps existing tests and local dev working.
+// 'gated' — visitors are read-only until they hold a write grant (redeemed
+//           passphrase or admin-granted trusted member). Required for any
+//           publicly reachable deployment, because /api/auth/register needs no
+//           credentials at all.
+const WRITE_ACCESS_MODE: 'open' | 'gated' =
+  process.env.WRITE_ACCESS_MODE === 'gated' ? 'gated' : 'open';
+
+// WebSocket origin gating. Browsers always send an `Origin` header on the WS
+// handshake, so a missing Origin identifies a non-browser client. Treating
+// "no Origin" as allowed is a fail-open default that lets any unidentified
+// client into a pad room, so fail closed unless the operator opts in (needed
+// only for scripted/CLI clients that do not send the header).
+const WS_ALLOW_NO_ORIGIN = process.env.WS_ALLOW_NO_ORIGIN === 'true';
+
+// Write passphrases, comma separated: `<phrase>[:<days>]`. `:0` (or an omitted
+// suffix) uses WRITE_GRANT_TTL_DAYS; a positive suffix overrides it per phrase.
+// Compared in constant time and never logged — see writeAccessService.
+const WRITE_PASSPHRASES: string[] = (process.env.WRITE_PASSPHRASES || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const WRITE_GRANT_TTL_DAYS = parsePositiveInt(process.env.WRITE_GRANT_TTL_DAYS, 7);
+// Sliding renewal threshold: a grant whose remaining life drops below this is
+// pushed back to a full TTL on the next write, so an actively used grant never
+// lapses mid-sentence.
+const WRITE_GRANT_RENEW_THRESHOLD_DAYS = parsePositiveInt(
+  process.env.WRITE_GRANT_RENEW_THRESHOLD_DAYS,
+  5
+);
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${PORT}`;
 const cookieFlags = isProduction
   ? 'HttpOnly; SameSite=Strict; Path=/; Secure'
@@ -181,6 +231,16 @@ function productionConfigWarnings(): string[] {
     );
   }
 
+  if (WRITE_ACCESS_MODE === 'open') {
+    warnings.push(
+      'WRITE_ACCESS_MODE is "open": anyone who can reach this instance can register an identity (no credentials required) and edit every public pad, including deleting files uploaded by others. Set WRITE_ACCESS_MODE=gated if this instance is reachable from the public internet.'
+    );
+  } else if (WRITE_PASSPHRASES.length === 0 && !ADMIN_TOKEN) {
+    warnings.push(
+      'WRITE_ACCESS_MODE is "gated" but neither WRITE_PASSPHRASES nor ADMIN_TOKEN is set, so nobody can obtain write access. Configure at least one, or grant a trusted member via the admin API.'
+    );
+  }
+
   return warnings;
 }
 
@@ -198,15 +258,19 @@ module.exports = {
   FILE_TTL_HOURS,
   FILE_TTL_CHECK_INTERVAL_MS,
   CONVERT_MAX_BYTES,
+  MAX_STORAGE_BYTES,
+  MAX_STORAGE_BYTES_PER_USER,
   CONVERT_TIMEOUT_MS,
   CONVERT_MAX_CONCURRENT,
   CONVERT_WORKER_HEAP_MB,
   MAX_PASSWORD_LENGTH,
   ADMIN_TOKEN,
   MAX_WS_CONNECTIONS,
+  WS_ALLOW_NO_ORIGIN,
   MAX_WS_CONNECTIONS_PER_IP,
   WS_PATCH_WINDOW_MS,
   MAX_WS_PATCHES_PER_WINDOW,
+  FTS_SYNC_DEBOUNCE_MS,
   TRUST_PROXY_HOPS,
   CONVERTIBLE_EXTS,
   CONVERT_FEATURES,
@@ -215,5 +279,9 @@ module.exports = {
   SESSION_TOKEN_TTL_DAYS,
   PUBLIC_ORIGIN,
   cookieFlags,
+  WRITE_ACCESS_MODE,
+  WRITE_PASSPHRASES,
+  WRITE_GRANT_TTL_DAYS,
+  WRITE_GRANT_RENEW_THRESHOLD_DAYS,
   productionConfigWarnings,
 };

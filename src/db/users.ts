@@ -16,15 +16,39 @@ function exists(code: string): boolean {
 
 function create(user: User): User {
   const db = sqlite.getDb();
-  db.prepare('INSERT INTO users (code, created_at) VALUES (?, ?)').run(
+  db.prepare('INSERT INTO users (code, created_at, display_name) VALUES (?, ?, ?)').run(
     user.code,
-    user.createdAt || Date.now()
+    user.createdAt || Date.now(),
+    user.displayName ?? null
   );
   return user;
+}
+
+function findByCode(code: string): User | undefined {
+  const db = sqlite.getDb();
+  const row = db.prepare('SELECT * FROM users WHERE code = ?').get(code);
+  return row ? sqlite.rowToUser(row) : undefined;
+}
+
+function findAll(): User[] {
+  const db = sqlite.getDb();
+  return db
+    .prepare('SELECT * FROM users ORDER BY created_at')
+    .all()
+    .map((r: any) => sqlite.rowToUser(r));
+}
+
+function setDisplayName(code: string, displayName: string | null): boolean {
+  const db = sqlite.getDb();
+  const name = displayName && displayName.trim() ? displayName.trim().slice(0, 64) : null;
+  return db.prepare('UPDATE users SET display_name = ? WHERE code = ?').run(name, code).changes > 0;
 }
 
 module.exports = {
   init,
   exists,
   create,
+  findByCode,
+  findAll,
+  setDisplayName,
 };

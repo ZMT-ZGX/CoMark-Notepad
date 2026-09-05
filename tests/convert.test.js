@@ -69,6 +69,67 @@ test('MIME sniff: CSV with correct extension converts to markdown table', async 
   assert.match(md, /\| Alice \| 30 \|/);
 });
 
+// ── CSV converter: BOM + blank-row policy (synced from markitdown#2303) ─────
+
+test('CSV: UTF-8 BOM is stripped from the header cell', async () => {
+  const md = await runWorker({
+    buffer: Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('name,age\nAlice,30\n')]),
+    ext: '.csv',
+    mimeType: 'text/csv',
+    originalName: 'export.csv',
+  });
+  assert.ok(!md.includes('\uFEFF'), 'BOM must not survive into the markdown');
+  assert.ok(md.startsWith('| name | age |'), 'first header cell must be clean');
+  assert.match(md, /\| Alice \| 30 \|/);
+});
+
+test('CSV: leading blank line does not destroy the table', async () => {
+  const md = await runWorker({
+    buffer: Buffer.from('\nname,age\nAlice,30\n'),
+    ext: '.csv',
+    mimeType: 'text/csv',
+    originalName: 'data.csv',
+  });
+  assert.equal(md, '| name | age |\n| --- | --- |\n| Alice | 30 |');
+});
+
+test('CSV: trailing blank lines are skipped', async () => {
+  const md = await runWorker({
+    buffer: Buffer.from('name,age\nAlice,30\n\n\n'),
+    ext: '.csv',
+    mimeType: 'text/csv',
+    originalName: 'data.csv',
+  });
+  assert.equal(md, '| name | age |\n| --- | --- |\n| Alice | 30 |');
+});
+
+test('CSV: blank line right after the header is skipped, interior blanks kept', async () => {
+  // markitdown#2303 semantics: outer + header-adjacent blanks trimmed,
+  // INTERIOR blanks kept as empty table rows (they may be part of the data).
+  const md = await runWorker({
+    buffer: Buffer.from('name,age\n\nAlice,30\n\nBob,40\n'),
+    ext: '.csv',
+    mimeType: 'text/csv',
+    originalName: 'data.csv',
+  });
+  assert.equal(
+    md,
+    '| name | age |\n| --- | --- |\n| Alice | 30 |\n|  |  |\n| Bob | 40 |'
+  );
+});
+
+test('CSV: all-blank input converts to empty markdown (worker reports empty result)', async () => {
+  await assert.rejects(
+    () => runWorker({
+      buffer: Buffer.from('\n\n\n'),
+      ext: '.csv',
+      mimeType: 'text/csv',
+      originalName: 'data.csv',
+    }),
+    /Conversion returned empty result/
+  );
+});
+
 test('unsupported type returns error', async () => {
   await assert.rejects(
     () => runWorker({

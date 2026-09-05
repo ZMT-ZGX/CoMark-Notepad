@@ -31,7 +31,20 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE TABLE IF NOT EXISTS users (
   code TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  display_name TEXT
+);
+
+-- Write-access grants. Bound to user_code (not to a cookie) so an admin can
+-- inspect, grant and revoke them server-side, and so they survive a browser
+-- restart. expires_at IS NULL means permanent (admin-granted trusted member).
+CREATE TABLE IF NOT EXISTS write_grants (
+  user_code TEXT PRIMARY KEY REFERENCES users(code) ON DELETE CASCADE,
+  source TEXT NOT NULL,
+  granted_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  last_used_at INTEGER,
+  granted_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS invitations (
@@ -60,6 +73,8 @@ CREATE INDEX IF NOT EXISTS idx_invitations_creator
   ON invitations(creator_code);
 CREATE INDEX IF NOT EXISTS idx_files_pad_id
   ON files(pad_id);
+CREATE INDEX IF NOT EXISTS idx_write_grants_expires
+  ON write_grants(expires_at);
 
 CREATE TABLE IF NOT EXISTS revoked_tokens (
   token TEXT PRIMARY KEY,
@@ -80,11 +95,19 @@ END;
 CREATE TRIGGER IF NOT EXISTS pad_ad AFTER DELETE ON pads BEGIN
   DELETE FROM pad_search WHERE id = OLD.id;
 END;
-
-CREATE TRIGGER IF NOT EXISTS pad_au AFTER UPDATE OF text ON pads BEGIN
-  UPDATE pad_search SET content = NEW.text WHERE id = NEW.id;
-END;
 `;
+
+/**
+ * Add a column to an existing table unless it is already present.
+ * `CREATE TABLE IF NOT EXISTS` only handles brand-new tables, so schema
+ * additions after the first release need an explicit ALTER.
+ */
+function ensureColumn(table: string, column: string, type: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+  if (cols.some((c: any) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  logger.info(`Schema migration: added ${table}.${column}`);
+}
 
 /**
  * Open SQLite database, create schema, migrate from store.json if needed.
@@ -94,7 +117,16 @@ function open(): any {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
+  // The per-update FTS trigger was removed in favour of a throttled sync
+  // (every keystroke re-tokenized the whole body through the trigram
+  // tokenizer). Older databases still carry the trigger, and leaving it in
+  // place would defeat the throttle entirely — drop it idempotently.
+  db.exec('DROP TRIGGER IF EXISTS pad_au');
   db.exec(SCHEMA);
+  // CREATE TABLE IF NOT EXISTS cannot add columns to an existing table, so
+  // later additions are applied here. Idempotent — safe on every boot.
+  ensureColumn('users', 'display_name', 'TEXT');
+  reconcileSearchIndex();
   logger.info(`SQLite opened: ${SQLITE_FILE}`);
 
   // Migrate from store.json if SQLite is empty and JSON exists
@@ -104,14 +136,31 @@ function open(): any {
 }
 
 /**
+ * Rebuild the FTS index from the pads table. Runs at boot so the index can
+ * never drift from the bodies: the throttled sync defers refreshes, and a
+ * crash between a body write and its refresh would otherwise leave stale
+ * search results until the pad is edited again. Pads are capped at MAX_PADS,
+ * so the rebuild is bounded and cheap.
+ */
+function reconcileSearchIndex(): void {
+  const padCount = db.prepare('SELECT COUNT(*) AS cnt FROM pads').get().cnt;
+  if (padCount === 0) return;
+  const rebuild = db.transaction(() => {
+    db.exec('DELETE FROM pad_search');
+    db.exec("INSERT INTO pad_search(id, title, content) SELECT id, '', text FROM pads");
+  });
+  rebuild();
+}
+
+/**
  * One-time migration: import store.json data into SQLite.
  * Only runs when the pads table is empty and store.json exists.
  */
 function migrateFromJSON() {
-  if (!fs.existsSync(STORE_FILE)) {
-    seedDefaultPad();
-    return;
-  }
+  // No store.json — nothing to migrate. A fresh install deliberately starts
+  // with zero pads: the legacy always-seeded Pad #1 was public (owner NULL),
+  // which on a public deployment made it readable by anyone who registered.
+  if (!fs.existsSync(STORE_FILE)) return;
 
   const padCount = db.prepare('SELECT COUNT(*) as cnt FROM pads').get().cnt;
   if (padCount > 0) return; // Already has data, skip migration
@@ -128,8 +177,8 @@ function migrateFromJSON() {
   let raw;
   try {
     raw = JSON.parse(fs.readFileSync(STORE_FILE, 'utf-8'));
-  } catch {
-    seedDefaultPad();
+  } catch (e: any) {
+    logger.warn(`store.json unreadable, skipping migration: ${e.message}`);
     return;
   }
 
@@ -247,15 +296,6 @@ function migrateFromJSON() {
   logger.info('Migrated store.json data to SQLite');
 }
 
-function seedDefaultPad() {
-  const padCount = db.prepare('SELECT COUNT(*) as cnt FROM pads').get().cnt;
-  if (padCount > 0) return;
-
-  db.prepare(
-    'INSERT INTO pads (id, text, text_version, password, created_at, owner_user_id, creator_code) VALUES (NULL, ?, 0, NULL, ?, NULL, NULL)'
-  ).run('', Date.now());
-}
-
 /**
  * Close the database connection.
  */
@@ -318,7 +358,7 @@ function rowToFile(row: any) {
 }
 
 function rowToUser(row: any) {
-  return { code: row.code, createdAt: row.created_at };
+  return { code: row.code, createdAt: row.created_at, displayName: row.display_name ?? null };
 }
 
 function rowToInvitation(row: any) {
@@ -346,4 +386,5 @@ module.exports = {
   close,
   getDb,
   getStoreSnapshot,
+  rowToUser,
 };

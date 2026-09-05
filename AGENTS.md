@@ -12,18 +12,18 @@ collab-notepad/
 │   ├── config.ts                 # Env vars & constants
 │   ├── types.ts                  # Core types + WsMessage union
 │   ├── auth/                     # session.ts · password.ts
-│   ├── middlewares/              # auth · security · errorHandler
-│   ├── routes/                   # auth · pads · files · invitations · convert · health
-│   ├── services/                 # padService · fileService · inviteService · convertService
-│   ├── db/                       # sqlite.ts (incl. FTS5 + triggers) · pads · files · users · invitations
+│   ├── middlewares/              # auth · security · writeAccess · errorHandler
+│   ├── routes/                   # auth · pads · files · invitations · convert · health · writeAccess (+members)
+│   ├── services/                 # padService · fileService · inviteService · convertService · writeAccessService
+│   ├── db/                       # sqlite.ts (incl. FTS5 + triggers) · pads · files · users · invitations · writeGrants · migrate
 │   ├── store/                    # DataStore facade
 │   ├── validators/               # Zod schemas
 │   ├── utils/                    # crypto · auth · errors · file · logger
-│   └── ws/                       # connections · broadcast · index
+│   └── ws/                       # connections · broadcast · index · handlers · validate · close
 ├── public/                       # Frontend (vanilla JS, zero framework)
 │   ├── index.html
 │   ├── js/                       # ES Modules
-│   │   ├── core.js               # Shared state singleton
+│   │   ├── core.js               # Shared state singleton (state shape + setters)
 │   │   ├── text-sync.js          # Patch send, offline queue, image paste
 │   │   ├── ws.js                 # WebSocket client
 │   │   ├── server.js             # HTTP API client
@@ -37,18 +37,24 @@ collab-notepad/
 │   │   ├── export.js             # Export Markdown + beforeunload
 │   │   ├── theme.js              # Theme toggle
 │   │   ├── qr.js                 # QR code
-│   │   └── gestures.js           # Mobile gestures
+│   │   ├── gestures.js           # Mobile gestures
+│   │   ├── presence.js           # Online-members chips (relay-only)
+│   │   └── write-access.js       # Write-gate UI: banner, chip, passphrase modal, members panel
 │   ├── vendor/                   # Browser globals (CommonJS → window.*)
 │   │   └── diff_match_patch.js   # Patch-based sync library
 │   └── style.css
 ├── convert-worker.js             # Worker thread: file → Markdown
-├── tests/                        # 72 integration tests
-│   ├── identity.test.js          # Auth & access control
-│   ├── smoke.test.js             # Core API, WebSocket
-│   ├── convert.test.js           # Worker conversion
+├── tests/                        # 108 integration tests (node --test)
+│   ├── helpers.js                # Shared harness: spawnServer/stopServer/installOriginFetch (NOT a test file)
+│   ├── identity.test.js          # Auth & access control (36)
+│   ├── smoke.test.js             # Core API, WebSocket (31)
+│   ├── convert.test.js           # Worker conversion (20)
+│   ├── write-access.test.js      # Write gate open/gated (9)
+│   ├── security.test.js          # WS frames, orphans, zip bombs, quotas, convert authz (8)
+│   ├── concurrency.test.js       # baseVersion mandatory, WS origin (4)
 │   └── e2e/                      # Playwright E2E
 ├── scripts/                      # Ops: deploy.sh (build+health+rollback) · backup.sh · sqlite-backup.js
-├── docs/                         # DEPLOYMENT.md (self-hosting runbook) · design notes
+├── docs/                         # DEPLOYMENT.md (self-hosting runbook) · competitive-analysis.md · public-deployment-plan.md
 ├── Dockerfile                    # Multi-stage (node:20-alpine, non-root)
 ├── docker-compose.yml            # Compose + Caddy; service-level mem_limit/cpus
 ├── Caddyfile                     # Reverse proxy + automatic HTTPS
@@ -75,14 +81,14 @@ docker compose up -d
 
 ```bash
 npm run typecheck                 # tsc --noEmit
-npm test                          # node --test (75 tests)
+npm test                          # node --test (108 tests)
 npm run lint                      # ESLint
 npm run format                    # Prettier
 npm run test:e2e                  # Playwright (requires build first)
 ```
 
-- Test framework: **Node.js built-in** (`node:test` + `node:assert/strict`), NOT jest
-- Tests spawn real server subprocesses on random ports with temp data dirs
+- **Test framework**: **Node.js built-in** (`node:test` + `node:assert/strict`), NOT jest
+- Tests spawn real server subprocesses on random ports with temp data dirs — the shared harness lives in `tests/helpers.js` (`spawnServer` / `stopServer` / `installOriginFetch`); do not copy-paste new spawn blocks
 - Worker tests use actual Worker threads with real file buffers
 - All tests must pass (exit 0) before any change is considered complete
 
@@ -98,7 +104,7 @@ npm run test:e2e                  # Playwright (requires build first)
 - **Naming**: camelCase for functions/vars, PascalCase for classes, UPPER_SNAKE for constants
 - **Security headers**: helmet with relaxed CSP (inline SVG favicon needs `unsafe-inline` style)
 - **Browser libs** go in `public/vendor/` wrapped to expose `window.*` globals
-- **State** is a single mutable singleton in `public/js/core.js`
+- **State** is a single mutable singleton in `public/js/core.js` — the shape and every setter live there; other modules mutate values only through `state.setWriteAccess()` / `state.setAdminToken()` / `getPatchQueue`-style methods, never by assigning new fields
 
 ## Architecture Notes
 
@@ -106,14 +112,19 @@ npm run test:e2e                  # Playwright (requires build first)
 - **CSRF**: Origin header validation with private IP bypass for LAN clients
 - **Pad access**: 3-tier — public (`ownerUserId=null`), private (owner+invited), legacy (admin-only)
 - **Pad unlock tokens**: bearer tokens for password-protected pads; **header only** (`X-Pad-Token`, comma-separated multi-token OK). Never put unlock tokens in query strings (access/proxy logs). Shared helpers: `extractPadTokens` / `hasValidUnlockToken` in `middlewares/security.ts`; client: `padAuthHeaders()` in `public/js/core.js`
-- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10); locked pads auth via first message `{ type: 'auth', padToken }`; every `applyPatch` re-validates `ws.unlockToken` (close **4403** if invalid). Sockets are counted from the `connection` event (pending) through `finalizeConnection` (live) so the 1.5s auth window can't be used to stack invisible connections
-- **Patch sync**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; pad-scoped offline queue in localStorage. **One broadcast frame per edit** — `applyPatch` sends only `patch` (which carries both the diff and the authoritative body); a second `text-update` snapshot is pure waste because the client's `version <= textVersion` guard drops it
+- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10); locked pads auth via first message `{ type: 'auth', padToken }`; every `applyPatch` re-validates `ws.unlockToken` (close **4403** if invalid). Sockets are counted from the `connection` event (pending) through `finalizeConnection` (live) so the 1.5s auth window can't be used to stack invisible connections. **Every close goes through `safeClose()` (`src/ws/close.ts`)** — `ws` throws a synchronous RangeError on reasons longer than 123 bytes, and a throw from inside ws's listeners kills the process (there is no uncaughtException net); never call `ws.close()` directly
+- **Write access gate** (`WRITE_ACCESS_MODE=gated`): all write paths run through `requireWriteAccess(writeAccessService)` (factory in `middlewares/writeAccess.ts`; admin check resolved per-request internally) + WS re-check on every patch (`4405`). Locked: 11 HTTP + 1 WS = 12 write paths — a new write endpoint without the gate is a security bug. Client UI: banner (read-only) + header chip (writable: remaining days + release) in `public/js/write-access.js`
+- **Patch sync**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; pad-scoped offline queue in localStorage; clients send `baseVersion` on every patch and the server nacks on mismatch. **`baseVersion` is MANDATORY on both write paths** (WS `patch` and HTTP `PUT/POST /:id/text`): a write that omits it is rejected (WS → `patch-nack`; HTTP → `409` conflict) instead of being applied against whatever the server currently holds. It used to be optional with the check skipped when absent, which made the concurrency control opt-in — any client could disable it by omitting one field and silently clobber a concurrent edit. Regression tests: `tests/concurrency.test.js` **One diff-only frame per edit** — `patch-ack` returns only `{textVersion, seq}` and the broadcast `patch` frame carries only the diff (the receiver rebuilds the body via `patch_apply` on its shadow; HTTP resync covers apply failures). Never put a full body back into these frames: acking a patch implies the server body equals the sender's `sentText`, and echoing bodies costs a full serialization per keystroke per peer
+- **Presence**: `{type:'presence'}` / `{type:'presence-request'}` frames are relay-only — the server stores nothing and runs no timeouts; per-connection 400ms relay throttle, removal via close broadcast + 35s client-side staleness prune. Chips live in `public/js/presence.js`; remote caret overlay in the textarea is deliberately NOT implemented (plain textarea can't host caret overlays)
 - **Editor writes**: always go through `setEditorText()` in `text-sync.js` so the caret is mapped across the diff; never assign `textarea.value` while an IME composition is active (see below)
-- **File conversion**: in-worker with configurable heap (`CONVERT_WORKER_HEAP_MB`, default 512MB) and concurrency (`CONVERT_MAX_CONCURRENT`, default 3), 60s timeout; default **100MB** (`CONVERT_MAX_BYTES`). Peak memory = concurrency × worker heap, and the file being converted is briefly held **twice** (main process + the structured-clone copy handed to the worker). This total must fit inside the container memory limit
+- **FTS5 search**: `pad_search` virtual table (trigram) + insert/delete triggers only — the per-update trigger was removed in favour of a **throttled per-pad sync** (`FTS_SYNC_DEBOUNCE_MS`, default 1200ms; batched flush in `db/pads.ts`, boot-time `reconcileSearchIndex()`, shutdown `flushSearchSyncNow()`). The pads row itself is written synchronously on every edit — do not "optimize" this into a write debounce (tests SIGKILL the server; only the index may lag). Search may trail edits by up to the debounce window; `/api/search` with access filtering + unlock gating; snippet delimiters are private-use `U+E000`/`U+E001` (client escapes then restores `<mark>`) — never raw HTML from FTS
+- **File conversion**: in-worker with configurable heap (`CONVERT_WORKER_HEAP_MB`, default 512MB) and concurrency (`CONVERT_MAX_CONCURRENT`, default 3), 60s timeout; default **100MB** (`CONVERT_MAX_BYTES`). Peak memory = concurrency × worker heap, and the file being converted is briefly held **twice** (main process + the structured-clone copy handed to the worker). This total must fit inside the container memory limit. **Archive guard is two-layer** (`assertSafeArchive` in `convert-worker.js`): declared-size pre-flight + streaming decompression verification (zlib pipe, cumulative cap, chunks discarded) — `CONVERT_MAX_BYTES` is injected via `workerData.maxBytes`, so both layers move with the config. The read-excel-file grandchild worker is unreachable — never assume `resourceLimits` bounds it; the archive guard does
+- **Conversion semantics benchmark** — `convert-worker.js` is hand-written (mammoth / pdf-parse / read-excel-file / turndown), and its per-format behaviour is benchmarked against **microsoft/markitdown** (the project briefly used `markitdown-ts`, removed in 46bfced). When markitdown ships fixes, port the RELEVANT ones to the worker (behavior + worker tests mirroring the upstream assertions), and record the per-item verdict in CHANGELOG. Do NOT re-add a markitdown dependency — the npm TS port is stale; the reference is the Python repo. `npm outdated` guards the converter's own libraries
+- **Aggregate storage quotas**: `MAX_STORAGE_BYTES` (instance) / `MAX_STORAGE_BYTES_PER_USER` (account) are checked **before** the upload rename (`fail()` cleans the `.part`); a rejected upload must leave nothing on disk
 - **Health probes**: `/api/health` is **liveness only — it must never touch the database** (Docker restarts the container after repeated failures, so a busy SQLite checkpoint must not kill a healthy process). `/api/health/ready` is readiness: it queries SQLite and returns `pads` / `files`, 503 if the DB is unreachable
 - **Container limits**: `docker-compose.yml` must use service-level `mem_limit` / `cpus`. `deploy.resources.limits` is only honoured in Swarm mode or with `--compatibility` — on a single self-hosted box it silently does nothing
-- **Logging**: production logs are JSON (pino) with `cookie` / `authorization` / `x-pad-token` / `password` / `token` redacted via `redact`. Pad unlock tokens are long-lived bearer credentials — never let them reach the log stream
-- **FTS5 search**: `pad_search` virtual table (trigram) + 3 triggers; `/api/search` with access filtering + unlock gating; snippet delimiters are private-use `U+E000`/`U+E001` (client escapes then restores `<mark>`) — never raw HTML from FTS
+- **Logging**: production logs are JSON (pino) with `cookie` / `authorization` / `x-pad-token` / `password` / `token` / `passphrase` / `adminToken` redacted via `redact`. Pad unlock tokens are long-lived bearer credentials — never let them reach the log stream
+- **File lifecycle**: TTL cleanup deletes files past `FILE_TTL_HOURS` **only when no pad body references them** (`files/<id>` substring — deleting a referenced attachment leaves a broken image/link). All unlink/write paths are `fs.promises`; uploads stream to a `.part` sibling and `rename` into place, so never write uploads directly to their final name
 - **WAL + busy_timeout=5000**: SQLite concurrency hardening
 - **DB migration**: SQLite-first; legacy `store.json` auto-imported with backup
 
@@ -136,7 +147,9 @@ npm run test:e2e                  # Playwright (requires build first)
 - Do NOT use `deploy.resources.limits` in `docker-compose.yml` for single-host deployment limits — it is ignored outside Swarm/`--compatibility`; use service-level `mem_limit` / `cpus`
 - Do NOT raise `CONVERT_MAX_CONCURRENT` without raising the container `mem_limit` proportionally (peak = concurrency × `CONVERT_WORKER_HEAP_MB`)
 - Do NOT read `process.env` directly in `app.ts` for config — parse it in `config.ts` so malformed values fall back consistently
-- Do NOT modify `state` object outside `public/js/core.js` modules
+- Do NOT modify the `state` shape outside `public/js/core.js` — other modules assign values only through core.js setters (`setWriteAccess`, `setAdminToken`, `setPatchQueue`, ...)
+- Do NOT call `ws.close()` directly anywhere in the server — route every close through `safeClose()` (`src/ws/close.ts`); a long reason throws a synchronous RangeError and kills the process
+- Do NOT add a write endpoint without the `requireWriteAccess` gate — 11 HTTP + 1 WS = 12 write paths are locked in gated mode
 - Do NOT commit secrets, `.env` files, or API keys
 
 ## Environment Variables
@@ -147,7 +160,14 @@ See `.env.example`. Key vars:
 - `ADMIN_TOKEN` — global pad management
 - `DATA_DIR` — data directory path (default: `./data`)
 - `PORT` — server port (default: 8000)
-- `CONVERT_MAX_BYTES` — max file size for Markdown conversion (default: 100MB)
+- `WRITE_ACCESS_MODE` — `open` (default) / `gated`; gated = read-only without a grant
+- `WRITE_PASSPHRASES` — comma-separated `<phrase>[:<days>]` redeemable for a 7-day (default) grant
+- `WRITE_GRANT_TTL_DAYS` / `WRITE_GRANT_RENEW_THRESHOLD_DAYS` — grant TTL & sliding-renewal threshold (defaults 7 / 5)
+- `WS_ALLOW_NO_ORIGIN` — `true` admits WS clients that send no Origin header (non-browser/scripted clients); server fails closed otherwise
+- `MAX_STORAGE_BYTES` / `MAX_STORAGE_BYTES_PER_USER` — aggregate storage quotas (defaults 2GB / 512MB)
+- `FILE_TTL_HOURS` — file TTL (default 72); referenced files never expire
+- `FTS_SYNC_DEBOUNCE_MS` — FTS index per-pad throttle (default 1200)
+- `CONVERT_MAX_BYTES` — max file size for Markdown conversion (default: 100MB); also caps archive decompression
 - `CONVERT_TIMEOUT_MS` — conversion timeout (default: 60000)
 - `CONVERT_MAX_CONCURRENT` / `CONVERT_WORKER_HEAP_MB` — conversion concurrency & per-worker heap (defaults 3 / 512). Raise concurrency only after raising the container `mem_limit` by the same multiple of the heap
 - `TRUST_PROXY_HOPS` — proxy hops trusted for `X-Forwarded-For` (default 0). **Set to 1 behind Caddy/Nginx**: at 0 every request looks like it comes from the proxy, collapsing the HTTP rate limiter and per-IP WebSocket cap into one shared bucket. Parsed once in `config.ts`; do not read `process.env` directly in `app.ts`
@@ -159,7 +179,7 @@ See `.env.example`. Key vars:
 A change is complete when:
 1. All code changes are saved to files
 2. `npm run typecheck` passes (0 errors)
-3. `npm test` passes with exit code 0 (75/75)
+3. `npm test` passes with exit code 0 (108/108)
 4. `npm run lint` passes with no new warnings
 5. If security-related: verify CSRF, auth, CSP, and unlock-token header-only behavior
 6. If frontend: verify in browser at relevant breakpoints (desktop + mobile)

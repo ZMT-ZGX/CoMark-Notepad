@@ -32,7 +32,8 @@ function remove(token: string): { ok: boolean; revokedGrants: number } | false {
     .get(token).cnt;
   const result = db.prepare('DELETE FROM invitations WHERE token = ?').run(token);
   if (result.changes === 0) return false;
-  db.prepare('DELETE FROM access_grants WHERE invite_token = ?').run(token);
+  // access_grants are removed automatically by ON DELETE CASCADE on
+  // access_grants.invite_token → invitations.token; no manual DELETE needed.
   return { ok: true, revokedGrants: grantsBefore };
 }
 

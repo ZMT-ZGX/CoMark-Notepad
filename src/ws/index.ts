@@ -1,5 +1,13 @@
 'use strict';
 
+/**
+ * WebSocket server initialization.
+ *
+ * Connection lifecycle (reserve → validate → auth → finalize → heartbeat)
+ * lives here; message dispatch is delegated to `handlers.ts` and
+ * validation to `validate.ts`.
+ */
+
 import type { CoMarkWebSocket } from '../types';
 const { WebSocketServer } = require('ws');
 const connections = require('./connections');
@@ -10,39 +18,63 @@ const { isAllowedOrigin } = require('../middlewares/security');
 const db = require('../db');
 const { generateId } = require('../utils/crypto');
 const logger = require('../utils/logger');
+const { safeClose } = require('./close');
 const {
   MAX_WS_CONNECTIONS,
   MAX_WS_CONNECTIONS_PER_IP,
   HEARTBEAT_INTERVAL_MS,
-  WS_PATCH_WINDOW_MS,
-  MAX_WS_PATCHES_PER_WINDOW,
   JSON_BODY_LIMIT,
+  WS_ALLOW_NO_ORIGIN,
 } = require('../config');
+const { parseWsMessage } = require('./validate');
+const { handleMessage } = require('./handlers');
 
-// Aliases used inside the message handler (kept module-local so the handler
-// reads as plain constants rather than a config lookup each time).
-const PATCH_WINDOW_MS = WS_PATCH_WINDOW_MS;
-const MAX_PATCHES_PER_WINDOW = MAX_WS_PATCHES_PER_WINDOW;
+// Minimum gap between room-wide presence-throttle resets for the same pad.
+const PRESENCE_RESET_COOLDOWN_MS = 2000;
+const lastPresenceResetAt = new Map<number, number>();
+
+/**
+ * Reject a frame: close with a fixed, short reason and keep the detail in the
+ * log instead.
+ *
+ * Two constraints force this shape:
+ *  1. `ws` throws a synchronous RangeError when a close reason exceeds 123
+ *     bytes (handled centrally by `safeClose`), and the throw would happen
+ *     inside the `message` listener — nothing catches it there, so the
+ *     process dies.
+ *  2. Echoing validation detail back to the client leaks the schema.
+ */
+function rejectFrame(ws: CoMarkWebSocket, reason: string, detail: string): void {
+  logger.warn('WS frame rejected', {
+    padId: ws.padId,
+    clientId: ws.clientId,
+    detail: detail.slice(0, 200),
+  });
+  safeClose(ws, 4400, reason);
+}
+
+// Database lookups needed during connection admission. Injected via `deps` so
+// initWSS stays testable and the admission path follows the same DI shape as
+// the message handlers (`patchDeps`); defaults to the real db modules.
+interface WsAdmissionDeps {
+  db?: typeof db;
+}
 
 function initWSS(
   server: any,
-  padService: any
+  padService: any,
+  writeAccessService?: any,
+  deps: WsAdmissionDeps = {}
 ): { wss: any; heartbeatTimer: ReturnType<typeof setInterval> } {
-  // Cap inbound frame size so a single oversized WS message can't exhaust
-  // server memory. WS frames bypass Express's JSON body-size limit, so this
-  // is the only guard against a huge patch frame.
+  const admissionDb = deps.db || db;
   const wss = new WebSocketServer({ server, maxPayload: JSON_BODY_LIMIT });
+  const patchDeps = { padService, writeAccessService };
 
   wss.on('connection', (ws: CoMarkWebSocket, req: any) => {
-    // Note: req.ip is an Express property — unavailable on raw upgrade req.
     const clientIp = req.socket.remoteAddress;
 
-    // Count this socket BEFORE anything that can await. A password-protected
-    // pad waits up to 1.5s for its `auth` message, and only then does the
-    // connection reach connections.add(); without counting it here, neither
-    // ceiling below can see it and an attacker can stack unlimited pending
-    // sockets against a locked pad. Released on close, or converted into a
-    // real connection by finalizeConnection().
+    // Reserve a slot before any async work so the connection ceiling
+    // covers pending auth sockets too.
     connections.reserve(clientIp);
     let reserved = true;
     const releaseReservation = () => {
@@ -52,79 +84,73 @@ function initWSS(
     };
     ws.once('close', releaseReservation);
 
-    // Hard connection ceiling to protect memory and heartbeat CPU.
-    // The socket is already reserved above, so this counts itself — hence
-    // `>` rather than `>=` to keep the original "at most MAX live" semantics.
+    // ── Connection ceilings ──────────────────────────────────────
     if (connections.getTotalCount() + connections.getPendingTotal() > MAX_WS_CONNECTIONS) {
-      ws.close(1013, 'Server overloaded');
+      safeClose(ws, 1013, 'Server overloaded');
       return;
     }
-
-    // Per-IP connection limit to prevent single-IP pool exhaustion
     if (
       connections.getIpCount(clientIp) + connections.getPendingIpCount(clientIp) >
       MAX_WS_CONNECTIONS_PER_IP
     ) {
-      ws.close(1013, 'Connection limit reached for this IP');
+      safeClose(ws, 1013, 'Connection limit reached for this IP');
       return;
     }
 
-    // Origin check: prevent cross-origin WebSocket connections.
-    // Unlike checkOrigin (HTTP), WebSocket handshakes from browsers always
-    // include an Origin header, so a missing Origin here indicates a non-browser
-    // client — allow it (same rationale as isAllowedOrigin returning true for
-    // missing Origin on GET requests).
+    // ── Origin check ─────────────────────────────────────────────
     const origin = req.headers.origin;
-    if (!isAllowedOrigin(origin)) {
-      ws.close(4400, 'Invalid origin');
+    // `isAllowedOrigin` returns true for a MISSING origin, a fail-open default
+    // that admits any client which simply omits the header. Browsers always
+    // send Origin on a WS handshake, so the only clients that omit it are
+    // non-browser ones: fail closed unless the operator opted in.
+    if (!origin ? !WS_ALLOW_NO_ORIGIN : !isAllowedOrigin(origin)) {
+      safeClose(ws, 4400, 'Invalid origin');
       return;
     }
 
-    // Parse padId from URL query — reject non-numeric or missing values
+    // ── Parse padId ──────────────────────────────────────────────
     const url = new URL(req.url, 'http://localhost');
     const rawPadParam = url.searchParams.get('pad');
     const rawPad = Number(rawPadParam);
     if (!Number.isInteger(rawPad) || rawPad <= 0) {
-      ws.close(4400, 'Invalid pad id');
+      safeClose(ws, 4400, 'Invalid pad id');
       return;
     }
     const padId = rawPad;
 
-    // Token verification: Cookie only (session token is never transmitted in URL)
+    // ── Session ──────────────────────────────────────────────────
     const cookieToken = parseCookies(req.headers.cookie || '')['session_token'];
     const token = cookieToken || null;
     const userId = session.verify(token);
-    ws.userId = userId && db.users.exists(userId) ? userId : null;
+    ws.userId = userId && admissionDb.users.exists(userId) ? userId : null;
 
-    // Access control: reject non-existent pads immediately
-    const targetPad = db.pads.findById(padId);
+    // ── Access control ───────────────────────────────────────────
+    const targetPad = admissionDb.pads.findById(padId);
     if (!targetPad) {
-      ws.close(4404, 'Pad not found');
+      safeClose(ws, 4404, 'Pad not found');
       return;
     }
-
-    // Check pad access
     if (!targetPad.ownerUserId || targetPad.ownerUserId === ws.userId) {
       // Public pad or owner — allow
-    } else if (!ws.userId || !db.invitations.hasAccessGrant(targetPad.ownerUserId, ws.userId)) {
-      ws.close(4401, 'Access denied');
+    } else if (
+      !ws.userId ||
+      !admissionDb.invitations.hasAccessGrant(targetPad.ownerUserId, ws.userId)
+    ) {
+      safeClose(ws, 4401, 'Access denied');
       return;
     }
 
+    // ── Finalize: register connection, bind message/close handlers ──
     function finalizeConnection(unlockToken: string | null = null) {
       ws.ipAddress = clientIp;
       ws.clientId = generateId();
       ws.padId = padId;
       ws.isAlive = true;
-      // Remember the unlock token presented at connect so every subsequent
-      // patch can re-validate it (token may expire or be revoked mid-session).
       ws.unlockToken = unlockToken;
-      // Patch rate-limit window state (fixed window, reset on first message
-      // of each 60s interval). See message handler below.
       ws.patchWindowStart = Date.now();
       ws.patchCount = 0;
-      // Handshake done: this socket stops being "pending" and becomes a real,
-      // counted connection.
+      ws.lastPresenceSent = 0;
+
       releaseReservation();
       connections.add(ws, { clientId: ws.clientId, padId, userId: ws.userId, ipAddress: clientIp });
 
@@ -133,96 +159,52 @@ function initWSS(
       });
       ws.on('close', () => {
         connections.remove(ws);
-        broadcast.toPad(padId, {
-          type: 'online-count',
-          padId,
-          count: connections.getPadCount(padId),
-        });
+        const remaining = connections.getPadCount(padId);
+        // Drop cooldown state for pads nobody is on, so the map can't grow
+        // without bound on a long-lived server.
+        if (!remaining) lastPresenceResetAt.delete(padId);
+        broadcast.toPad(padId, { type: 'online-count', padId, count: remaining });
+        broadcast.toPad(padId, { type: 'presence', padId, wsId: ws.clientId, gone: true });
       });
       ws.on('error', () => connections.remove(ws));
       ws.on('message', (raw: Buffer) => {
-        let msg;
+        // Last-resort net: a throw from anywhere below would otherwise escape
+        // into ws's receiver and take the process down (there is no
+        // uncaughtException handler). Reject-don't-crash.
         try {
-          msg = JSON.parse(raw as unknown as string);
-        } catch {
-          return;
-        }
-        if (msg.type === 'patch' && padService) {
-          if (msg.padId !== padId) return;
-          // Per-connection patch rate limit (DoS hardening — HTTP write path
-          // has express-rate-limit, but WS messages bypass Express entirely).
-          const now = Date.now();
-          if (now - ws.patchWindowStart > PATCH_WINDOW_MS) {
-            ws.patchWindowStart = now;
-            ws.patchCount = 0;
-          }
-          ws.patchCount += 1;
-          if (ws.patchCount > MAX_PATCHES_PER_WINDOW) {
-            logger.warn('WS patch rate limit exceeded, closing connection', {
-              padId,
-              clientId: ws.clientId,
-              count: ws.patchCount,
-            });
-            try {
-              ws.close(4001, 'Patch rate limit exceeded');
-            } catch {}
+          let rawObj: unknown;
+          try {
+            rawObj = JSON.parse(raw as unknown as string);
+          } catch {
             return;
           }
-
-          padService
-            .applyPatch(
-              ws.userId,
-              padId,
-              msg.data,
-              ws.clientId,
-              typeof msg.operationId === 'string' ? msg.operationId : null,
-              typeof msg.baseVersion === 'number' ? msg.baseVersion : null,
-              ws.unlockToken || null
-            )
-            .then((result: any) => {
-              if (!result) return;
-              try {
-                if (result.notFound || result.denied) {
-                  // Pad gone or access revoked mid-session — drop quietly.
-                  return;
-                }
-                if (result.locked) {
-                  // Unlock token expired or revoked — drop the connection so
-                  // the client re-auths rather than looping nacks forever.
-                  ws.close(4403, 'Pad locked');
-                  return;
-                }
-                if (result.ok) {
-                  ws.send(
-                    JSON.stringify({
-                      type: 'patch-ack',
-                      textVersion: result.pad.textVersion,
-                      text: result.pad.text,
-                      seq: msg.seq,
-                    })
-                  );
-                } else {
-                  // Patch failed to apply (concurrent conflict or malformed).
-                  // Send the authoritative full text back to the sender so its
-                  // shadow resets. Uses a dedicated 'patch-nack' (not text-update)
-                  // so the client applies it immediately even while focused,
-                  // bypassing the deferred-merge path that could drop the reset.
-                  ws.send(
-                    JSON.stringify({
-                      type: 'patch-nack',
-                      padId,
-                      text: result.pad.text,
-                      textVersion: result.pad.textVersion,
-                    })
-                  );
-                }
-              } catch {}
-            })
-            .catch(() => {});
+          const parsed = parseWsMessage(rawObj);
+          if (!parsed.ok) {
+            rejectFrame(ws, 'Invalid message', parsed.error);
+            return;
+          }
+          handleMessage(ws, parsed.data, patchDeps);
+        } catch (err) {
+          logger.error({ err }, 'WS message handler failed');
+          safeClose(ws, 4000, 'Internal error');
         }
       });
 
+      // ── Hello + presence bootstrap ────────────────────────────
       ws.send(JSON.stringify({ type: 'hello', wsId: ws.clientId, padId, userId: ws.userId }));
+      // A joiner clears the room's presence throttle so everyone answers the
+      // request below immediately instead of waiting out their 400ms window.
+      // Without a cooldown a client that reconnects in a loop makes every peer
+      // rebroadcast on every join — O(N^2) frames from a single socket — so the
+      // reset is capped at one per pad per PRESENCE_RESET_COOLDOWN_MS.
+      const now = Date.now();
+      if (now - (lastPresenceResetAt.get(padId) || 0) >= PRESENCE_RESET_COOLDOWN_MS) {
+        lastPresenceResetAt.set(padId, now);
+        for (const peer of connections.getPadClients(padId) || []) {
+          peer.lastPresenceSent = 0;
+        }
+      }
+      broadcast.toPad(padId, { type: 'presence-request', padId });
       broadcast.toPad(padId, {
         type: 'online-count',
         padId,
@@ -230,37 +212,45 @@ function initWSS(
       });
     }
 
-    // Password-protected pad: token sent as first WebSocket message (not in URL)
-    // to avoid exposing it in proxy/server access logs.
+    // ── Password-protected pad: auth handshake ──────────────────
     if (targetPad.password) {
-      const authTimer = setTimeout(() => ws.close(4403, 'Pad locked'), 1500);
-      // Clear timer if socket closes before auth (e.g. client disconnect, heartbeat timeout)
+      const authTimer = setTimeout(() => safeClose(ws, 4403, 'Pad locked'), 1500);
       ws.once('close', () => clearTimeout(authTimer));
       ws.once('message', (raw: Buffer) => {
         clearTimeout(authTimer);
-        let msg;
         try {
-          msg = JSON.parse(raw as unknown as string);
-        } catch {
-          ws.close(4400, 'Invalid message');
-          return;
+          let rawObj: unknown;
+          try {
+            rawObj = JSON.parse(raw as unknown as string);
+          } catch {
+            rejectFrame(ws, 'Invalid message', 'auth handshake: unparseable JSON');
+            return;
+          }
+          const parsed = parseWsMessage(rawObj);
+          if (!parsed.ok) {
+            rejectFrame(ws, 'Invalid message', parsed.error);
+            return;
+          }
+          if (parsed.data.type !== 'auth') {
+            rejectFrame(ws, 'Expected auth message', `got ${parsed.data.type}`);
+            return;
+          }
+          if (!padService || !padService.isValidUnlockToken(parsed.data.padToken, padId)) {
+            safeClose(ws, 4403, 'Pad locked');
+            return;
+          }
+          finalizeConnection(parsed.data.padToken);
+        } catch (err) {
+          logger.error({ err }, 'WS auth handshake failed');
+          safeClose(ws, 4000, 'Internal error');
         }
-        if (
-          msg.type !== 'auth' ||
-          !padService ||
-          !padService.isValidUnlockToken(msg.padToken, padId)
-        ) {
-          ws.close(4403, 'Pad locked');
-          return;
-        }
-        finalizeConnection(typeof msg.padToken === 'string' ? msg.padToken : null);
       });
     } else {
       finalizeConnection(null);
     }
   });
 
-  // Heartbeat
+  // ── Heartbeat ────────────────────────────────────────────────────
   const heartbeatTimer = setInterval(() => {
     connections.forEach((ws: CoMarkWebSocket) => {
       if (ws.readyState !== 1) {

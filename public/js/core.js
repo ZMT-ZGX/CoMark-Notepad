@@ -15,6 +15,9 @@
 //                    request/response matching, so a stale response from a
 //                    previous pad can never be applied to the new one.
 //   pendingRemoteState : remote text deferred while the editor is focused.
+//   pendingRemotePatches : remote diffs deferred while an IME composition is
+//                    active — patch frames carry no body, so they are parked
+//                    as diffs and replayed in arrival order at compositionend.
 //
 // `seenOperations` grows to 10k entries per pad, so pads are kept on a small
 // LRU: the least recently used ones have their dedupe cache dropped, while
@@ -40,6 +43,7 @@ export function getPadSync(padId) {
       pendingTarget: null,
       requestToken: 0,
       pendingRemoteState: null,
+      pendingRemotePatches: [],
       seenOperations: new Set(),
     };
   }
@@ -68,12 +72,34 @@ export const state = {
   patchQueueKey(padId = this.currentPadId) {
     return `patch-queue:${padId || 1}`;
   },
+  isPadLocked(padId = this.currentPadId) {
+    const pad = this.pads.find((p) => Number(p.id) === Number(padId));
+    return !!(pad && pad.hasPassword);
+  },
+  // Queues for password-protected pads live in memory only.
+  //
+  // A queued entry is a diff from the confirmed shadow, so the first offline
+  // edit to a freshly-loaded pad makes the entry effectively the *whole
+  // document*. Writing that to localStorage leaves the protected body in
+  // cleartext on disk — readable by any script running in the origin and
+  // surviving browser restarts — which is precisely what the pad password
+  // exists to prevent. The trade-off: unsent edits to a locked pad are lost
+  // on reload instead of being recovered.
+  volatilePatchQueue: {},
   getPatchQueue(padId = this.currentPadId) {
+    if (this.isPadLocked(padId)) return this.volatilePatchQueue[padId] || [];
     try { return JSON.parse(localStorage.getItem(this.patchQueueKey(padId)) || '[]'); } catch { return []; }
   },
   // A failed write must be visible: silently dropping the queue lost the
   // user's offline edits while the banner still promised they were pending.
   setPatchQueue(q, padId = this.currentPadId) {
+    if (this.isPadLocked(padId)) {
+      this.volatilePatchQueue[padId] = q;
+      // Drop anything persisted before this pad became known-locked.
+      try { localStorage.removeItem(this.patchQueueKey(padId)); } catch {}
+      return;
+    }
+    delete this.volatilePatchQueue[padId];
     const key = this.patchQueueKey(padId);
     try {
       localStorage.setItem(key, JSON.stringify(q));
@@ -94,6 +120,19 @@ export const state = {
     timeoutMs: 60 * 1000,
     extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'csv', 'txt', 'log', 'html', 'htm', 'json', 'xml', 'yaml', 'yml', 'jpg', 'jpeg', 'png', 'gif'],
     features: { pptx: true, imageMetadata: true, imageCaption: false, ocr: false },
+  },
+  // Write-access gate state. The SHAPE lives here (state is declared in one
+  // place); write-access.js updates values only through the setters below —
+  // the same getter/setter contract as getPatchQueue/setPatchQueue.
+  gated: false,
+  writeAccess: { allowed: true, source: 'open', permanent: true, expiresAt: null, daysRemaining: null },
+  adminToken: null,
+  setWriteAccess(next) {
+    this.gated = !!next.gated;
+    this.writeAccess = next.writeAccess;
+  },
+  setAdminToken(token) {
+    this.adminToken = token || null;
   },
 };
 

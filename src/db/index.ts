@@ -5,6 +5,7 @@ const pads = require('./pads');
 const files = require('./files');
 const users = require('./users');
 const invitations = require('./invitations');
+const writeGrants = require('./writeGrants');
 const migrate = require('./migrate');
 
 // FTS5 exports surfaced on the db namespace for the /api/search route
@@ -16,6 +17,7 @@ module.exports = {
   files,
   users,
   invitations,
+  writeGrants,
   migrate,
   FILES_DIR,
   searchPads,

@@ -19,6 +19,8 @@ import { initExport, initBeforeUnload } from './js/export.js';
 import { initShortcuts } from './js/shortcuts.js';
 import { initGestures, reinitGesturesOnResize } from './js/gestures.js';
 import { initSearch } from './js/search.js';
+import { initWriteAccess } from './js/write-access.js';
+import { initPresence } from './js/presence.js';
 
 // --- Mobile detection ---
 function updateMobileClass() {
@@ -72,6 +74,8 @@ async function init() {
   initShortcuts(globalThis.hotkeys);
   initGestures();
   initSearch();
+  initWriteAccess();
+  initPresence();
 
   // Async: load capabilities + identity in parallel
   await Promise.all([loadConvertCapabilitiesUI(), initIdentity()]);

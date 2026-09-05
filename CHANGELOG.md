@@ -2,6 +2,88 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.2.3] - 2026-09-05
+
+### 同步协议瘦身 + FTS 节流 + 文件生命周期修复（竞品代码级分析落地）
+
+> 依据：`docs/competitive-analysis-code-level.md`（HedgeDoc / Etherpad / Yjs / ShareDB / Docmost / Memos / SilverBullet 源码对比）。Etherpad `PadMessageHandler.ts` 的 `ACCEPT_COMMIT`（ack 只回版本号）与 HedgeDoc `realtime-note.service.ts` 的「定时快照代替每键写库」是本次改造的两个主要参照。
+
+1. **patch-ack 与 patch 广播帧去全量正文（P0，带宽/序列化 CPU）** — 服务端 `applyPatch` 本就要求客户端携带 `baseVersion` 且与 `pad.textVersion` 一致才应用，因此 ack 时刻服务端正文**必然**等于发送方已持有的 `sentText`，回传全文是零信息的双份序列化。现在 `patch-ack` 只回 `{textVersion, seq}`；广播帧同样只含 diff，接收方对本地 shadow `patch_apply` 重建正文（此前每击键向每个其他客户端多推一份最多 100KB 的正文），失败时沿用 HTTP `loadPadContent()` 重同步。`ackInflight` 相应简化（shadow 直接推进到 `sentText`，DOM 写路径删除）。
+2. **IME 组合态兼容 diff-only 广播** — `applyRemotePatch` 原先只在「携带权威正文」分支有 IME 暂存；正文取消后补丁帧改为 park 成 `pendingRemotePatch`（core.js per-pad 状态新增字段），`compositionend` 时先于 `pendingRemoteState` 回放，继续保证组合态不写 `textarea.value`。
+3. **FTS 索引从「每击键全量重建」改为按 Pad 节流刷新（P0，写放大）** — 删除 `pad_au` UPDATE 触发器（`DROP TRIGGER IF EXISTS`，老库幂等迁移），`db/pads.ts` 新增 per-pad 防抖（`FTS_SYNC_DEBOUNCE_MS`，默认 1200ms）：窗口内多次编辑只保留最新正文，窗口结束时一个事务批量 `UPDATE pad_search`。**正文行仍同步落盘**（崩溃丢数据窗口不变，测试以 SIGKILL 清场故不做落库 debounce），仅 trigram 重分词延迟；启动时 `reconcileSearchIndex()` 从 `pads` 表全量对账，停机时 `flushSearchSyncNow()` 收尾。搜索一致性窗口 ≤ 1.2s，已记入文档。
+4. **文件 TTL 回收加引用保护（P0，数据安全）** — `findExpired` 增加反连接子查询：正文含 `files/<id>` 引用的附件**永不过期**（删除被正文引用的文件会留下永久破图/死链）。TTL 语义变为「未被任何 Pad 正文引用且超过 `FILE_TTL_HOURS`」。`deletePad` / `deleteFile` / `clearFiles` / 转换替换源文件 / TTL 批清理全部改为 `fs.promises.unlink`（并发），`cleanupExpiredFiles` 转 async。
+5. **上传原子化** — 上传先写 `.part` 临时文件，流结束后 `rename` 到最终名；并发读侧要么看到完整文件要么看不到，不再可能读到半截正文。失败/中止路径清理临时文件（fire-and-forget async unlink）。
+6. **在线成员 presence（P1，协作可感知性）** — 新增 `{type:'presence'}` / `{type:'presence-request'}` WS 消息：客户端在输入/空闲翻转时广播 `{name, active}`（500ms 节流），服务端**只转发不存储**（400ms/连接节流防刷），新连接加入时全房间（含新连接）应答一轮实现秒级收敛；断开时服务端广播 `gone`，客户端另有 35s 陈旧度兜底清理。UI 为头部彩色芯片（颜色由 wsId 哈希得出），active 成员呼吸闪烁；移动端隐藏。刻意**不做 textarea 远端光标叠加**（原生 textarea 无法承载 caret overlay，属独立专题）。
+7. **测试** — 新增 5 例：陈旧 baseVersion 拒收并回传权威正文、匹配 baseVersion 接受且 ack 无正文、presence 转发/回显排除/离场广播、FTS 节流前后搜索可见性、TTL 回收保留被引用文件且异步删除磁盘文件；原「广播帧必须携带正文」断言反转为「必须 diff-only」。当时全量 91/91；最终全量见下方「并发协议收紧」（102/102）。
+8. **环境变量** — 新增 `FTS_SYNC_DEBOUNCE_MS`（默认 1200）；`FILE_TTL_HOURS` 语义更新（仅回收未被引用文件），`.env.example` / README 同步。
+
+### 并发协议收紧：并发控制由 opt-in 改为强制（P0，2026-09-04）
+
+1. **`baseVersion` 改为强制（P0，正确性）** — `padService.applyPatch` 与 `updateText` 原先在 `baseVersion` 缺失时**整段跳过版本校验**，使乐观并发控制形同 opt-in：任何客户端只要省略这个字段，就能把基于旧版本的 patch / 整篇正文直接套用到服务端当前状态上，静默覆盖并发编辑。现在缺失即拒绝（WS 返回 `patch-nack`，HTTP 返回 `409 conflict` 走客户端既有的重同步合并路径）。自带客户端本就每次都发送 `baseVersion`，因此正常协作路径不受影响。
+
+   > **行为变更**：直接调用 API 的外部脚本/旧客户端必须为写请求带上 `baseVersion`，否则会被 `409` 拒绝。这是收紧协议换取正确性的必要代价。
+
+2. **WS 握手改为 fail-closed（P1，安全）** — `isAllowedOrigin()` 对**缺失** `Origin` 头返回 `true`（fail-open），而 WS 鉴权路径直接复用该函数且没有 Referer 兜底，导致任何不带 `Origin` 的 WS 客户端都能进入 pad 房间。浏览器在 WS 握手时总是发送 `Origin`，因此默认改为拒绝；非浏览器/脚本客户端需显式 `WS_ALLOW_NO_ORIGIN=true` 才放行。
+
+3. **回归测试** — 新增 `tests/concurrency.test.js`（4 例）：省略 `baseVersion` 的 patch 必须被 nack 且不覆盖并发编辑、省略 `baseVersion` 的整篇写入必须 409、无 `Origin` 的 WS 必须被 4400 拒绝、opt-in 时脚本客户端仍可连接。原「并发 patch 两个都成功」的用例改写为「同 base 的两个 patch 只有一个生效、另一个 nack」——它此前正是依赖被跳过的版本校验才成立。全量 **102/102** 通过。
+
+### 安全专项修复（S1–S8，2026-09-03）
+
+> 覆盖：依赖漏洞 / 后端权限 / 前端 XSS / 文件上传与转换 / WebSocket / 数据库与配置脱敏。完整审计后修复 8 项，新增回归测试 `tests/security.test.js`。`npm audit` 复核：**0 漏洞**（含把 `dompurify` 固定到已修复 mXSS 的版本）。
+
+1. **WS 原型链污染崩溃（P0，S1）** — `src/ws/index.ts` 在 `safeParse` 之外、直接 `Object.assign` 客户端帧前，恶意 `{type:"constructor", ...}` 会触碰 `Object.prototype`，引发同步 `TypeError` 杀进程。改为对所有 `message.data` 先做 `try/catch JSON.parse` + 结构守卫，`type` 必须是枚举白名单字符串才进入分发；非法帧仅记录并丢弃，不再抛出。
+2. **WS 过长 close reason RangeError 崩溃（P0，S2）** — 早期 `try/finally` 中对 `ws.close(...)` 传入超长 `reason` 会抛同步 `RangeError`（非法长度），该异常逃出 `handleClose` 顶层。改为 `safeClose()` 封装（`src/ws/close.ts`）：对 `reason` 截断到 123 字节并 `try/catch`，连接准入 / auth 握手 / 消息分发 / 写门控 / 优雅关闭等**全部**关闭路径统一走它；帧拒绝路径（`rejectFrame`）保留「细节进日志、客户端只收固定短 reason」的语义并复用 `safeClose`。
+3. **上传 rename 后孤儿文件 + 字段顺序绕过（P1，S3）** — `fileService.uploadFile` 先前先 `rename` 落盘再校验权限/配额，被拒的上传会留下无法回收的磁盘孤儿文件；且校验依赖请求字段顺序，畸形体可绕过早期检查。`convert-worker.js` 与 `fileService` 改为**先鉴权、先配额、先写 `.part` 临时文件，`rename` 成功后才计入库**；所有失败/中止路径清理 `.part`（fire-and-forget `fs.promises.unlink`）。
+4. **padService 空守卫（P1）** — `padService.getPad` / `getState` / `applyPatch` 在 `pad` 为 `null` 时补 `ForbiddenError`/`BadRequest` 守卫，避免空值向下透传导致 500 或误读。
+5. **XLSX 解压炸弹 OOM（P1，S4）** — 转换路径按中央目录声明的 `uncompressedSize` 直接 `Buffer.alloc` 解压，恶意 zip 可瞬间分配数 GB 致 OOM。`convert-worker.js` 改为**两层防御**（上限复用 `CONVERT_MAX_BYTES`，经 `workerData.maxBytes` 注入）：① 中央目录**声明预检**——per-entry / 总量上限 + 压缩比率检查（`getEntries()` 只解析中央目录，不解压，检查本身不可攻击）；② **实际流式解压验证**——每个 entry 经 zlib 流式管道解压，累计输出超过上限立即中止，chunks 只计数不物化。声明尺寸撒谎时，真实输出一旦越过上限即被捕获，解析库随后的解压不可能超过已测得的真实尺寸。代价：OOXML 解压两遍（验证 + 解析），在 60s 超时的 worker 内可接受。
+6. **嵌套 worker 僵尸（P1，S5）** — 转换超时后 `worker.terminate()` 未 `await`，且孙 worker（`worker-f`，read-excel-file 内部解析线程）未设 `resourceLimits`，超时后成为无父引用僵尸。`convertService` 改为 `await terminate()` 并给**外层** worker 设 `resourceLimits`。孙 worker 本进程无句柄、`resourceLimits` **无法**注入——其内存改由 `assertSafeArchive` 的流式解压验证兜底（真实解压总量限制在 `CONVERT_MAX_BYTES` 内，见 S4），外加转换并发上限。
+7. **预览 XSS + DOMPurify 版本（P1，S6）** — `DOMPurify@3.0.11` 存在嵌套属性 mXSS CVE；且 `public/js/preview.js` 因模块导入路径写错**从未被加载**，预览实际退回未净化的 `innerHTML`。修正导入、固定 `dompurify` 到已修复版本、并在 `innerHTML` 前强制 `DOMPurify.sanitize`，无净化器时回落为 `escapeHtml` 纯文本。
+8. **加锁 Pad 离线队列明文落盘（P1，S7）** — 离线队列以明文 `localStorage` 写入加锁 Pad 正文；队列首条是「已确认 shadow → 最新正文」的 diff，对刚加载的 Pad 而言**等同于整篇文档**，等于把受口令保护的内容以明文留在磁盘（同源任意脚本可读、且跨浏览器重启留存）。改为**加锁 Pad 的队列只存内存、绝不持久化**：`core.js` 新增 `volatilePatchQueue`，`getPatchQueue`/`setPatchQueue` 对 `isPadLocked()` 的 Pad 只走内存分支，并在 Pad 变为已知加锁态时 `localStorage.removeItem` 清除此前遗留的明文。
+
+   > **取舍**：这是「不落盘」而非「加密落盘」——加锁 Pad 的待发离线编辑在页面重载后会丢失（加密方案可实现恢复，代价是引入客户端密钥派生与口令耦合的攻击面）。**未加锁 Pad 的队列行为不变**，仍写 `localStorage` 且配额超限时降级保留最新一条。
+
+**权限层（S8）** — 公开 Pad 上任意自注册用户此前可删除/清空他人文件（`DELETE /api/files/:id`、`clearFiles` 仅 `checkOrigin` 未校验归属）。`routes/files.ts` 改为 `requireWriteAccess` + `requirePadUnlock` 双门控，且删除/清空经 `fileService` 内 `canAccessPad(req.userId, pad)` 复检；`security.test.js` 新增「跨用户删除被 403 拒绝」用例。
+
+**回归测试** — 新增 `tests/security.test.js`（**7 例**全绿：恶意 WS 帧不崩溃、被拒上传不留孤儿文件、跨用户删文件被拒、压缩炸弹被拒且进程存活、聚合/按账户存储配额各 1、注册限流；后三项属 9.3/9.4 回归，随安全专项一并落地）；`tests/identity.test.js` / `tests/smoke.test.js` 同步加固权限与 WS 健壮性断言。
+
+### 范围外新增（本轮一并落地，原规格未要求）
+
+1. **聚合存储配额** — 新增 `MAX_STORAGE_BYTES`（实例总上限，默认 2GB）与 `MAX_STORAGE_BYTES_PER_USER`（按账户上限，默认 512MB）。per-file 上限只约束单次上传，此前一个账户可反复传 100MB 直至磁盘写满。配额在 `rename` 前检查（被拒上传不留盘），`db/files.sumBytes` 支持 per-owner 聚合。
+2. **presence join 节流上限** — 新连接清除房间 400ms 转发节流的操作，按 Pad 加 2s（`PRESENCE_RESET_COOLDOWN_MS`）冷却：否则一个循环重连的客户端让每个在线者在每次加入时重广播，单 socket 产生 O(N²) 帧。代价：极端场景下新加入者的收敛最迟 ~2s（仍为秒级，但低于此前「立即」）。
+3. **日志脱敏补全** — pino `redact` 增加 `passphrase` / `adminToken` 键。
+4. **invitations 表迁移** — 删除用户时联动清理授权（外键 CASCADE），替代手工 DELETE。
+5. **store/index.ts 重构** — factory 函数改 class 形态（对齐 services 的类风格），行为不变。
+6. **测试 harness 去重** — 新增 `tests/helpers.js`（`installOriginFetch` / `getPristineFetch` / `spawnServer` / `stopServer`），消除 5 个测试文件各自的复制粘贴 spawn/stop 块；smoke 保留自己的 per-request Origin 注入（其部分用例断言「无 Origin 请求被拒」）。
+7. **写权限 UI 补齐** — header 新增可写态 chip（显示剩余天数 + 「放弃写权限」按钮，修复释放操作在 UI 上不可达），只读横幅同步补 `[hidden]` 显式覆盖（author `display: flex` 会压过 UA 的 `hidden` 规则，横幅此前永不可隐藏）。
+8. **文档** — `docs/competitive-analysis.md`（竞品五维横评）、`docs/oss-gap-analysis.md`、`docs/public-deployment-plan.md`（公网团队部署清单）。
+
+### 评审落地：转换破坏性写语义 + 转换配额（2026-09-04）
+
+> 二次对抗审查发现转换路径的两个真实缺口，与 S8（跨用户删除）同源。
+
+1. **转换属破坏性写，非读（权限缺口）** — `convertService.convert` 此前只做 `canAccessFile`（读级）检查，但转换成功后 `removeFile` + `unlink` **删除源文件**：持写权限用户可把他人上传转换掉，绕过 `deleteFile` 的 `canManagePad` 门控。现增加破坏性写门控：Pad 管理者（owner/admin）恒可；上传者本人可（转换自己的上传）；无主 legacy 上传同 `deleteFile` 放宽（登录即可）；匿名 403。回归测试：`security.test.js` 新增「跨用户转换被 403 拒绝且源文件原样存活」（当时全量 103/103，最终全量见下方 markitdown 同步条目）。
+2. **转换配额旁路** — 转换产物是新 `files` 行（≤50MB 输出上限），此前**不经过**实例/按账户配额：反复转换可绕过 `MAX_STORAGE_BYTES`。现于**磁盘写入前**复检实例 + 按账户配额（复用上传语义，`resolveFileOwner` 归属），超限 413 `STORAGE_QUOTA`；被拒转换不留孤儿 md、不改源文件。
+
+> **已知问题（本节如实记录，未修）**：① 存储配额 check-then-act 竞态——`sumFileBytes` → `await rename` → `createFile` 间让出事件循环，两个并发上传可双双通过配额检查（上传限流 20/15min/IP + 单文件 100MB + 默认 2GB，实际风险低；彻底修复需把 sum+insert 事务化）；② `findExpired` 对每个过期候选做 `pads.text` 全扫（50 Pad × 100KB ≈ 5MB/候选，每小时同步执行，数据增长后可拖慢事件循环数秒；结构修复需 `pad_file_refs` junction 表）；③ gated 模式下管理员经 WS 无法编辑——浏览器无法在 WS 握手携带 `X-Admin-Token`，管理员需兑换口令写权限（fail-closed，故无安全缺口）。
+
+### 转换器同步：markitdown v0.1.6 → v0.1.8b1（CSV 修复落地，2026-09-04）
+
+> 上游参照：microsoft/markitdown（本项目的转换能力源出其 markitdown-ts 集成，后被手写 worker 取代，语义以 MarkItDown 为基准）。v0.1.8b1（预发布，2026-09-04）含 37 项修复、无新特性；v0.1.7（2026-07-29）5 项。逐项对照本项目的转换器形态后，仅 CSV 语义存在可移植差距，已同步：
+
+1. **CSV UTF-8 BOM 剥离（markitdown#2303）** — Excel 等工具导出 CSV 时前置 BOM，原实现会把 `\uFEFF` 落进表头第一格。现于解析前剥离。
+2. **CSV 空白行语义对齐（markitdown#2303）** — 原实现「丢弃全部空行」；对齐为 markitdown 语义：**外层**空行（首/尾）与**表头后紧跟**的空行删除，**中间**空行保留渲染为空表格行（`|  |  |`，可能是数据的一部分）；全空输入返回空 markdown（触发既有的「Conversion returned empty result」拒绝路径）。`rowsToMarkdownTable` 加 `keepBlankRows` 选项，XLSX / PPTX 路径保持原过滤行为不变。
+3. **已核对、无需同步的上游修复** — CSV 值转义管道/换行（#2266，`escapeTableCell` 原有）；DOCX 下划线/样式容错/ZIP 大小写（#2017/#2190/#2016，mammoth 1.12 ≥ CVE-2025-11849 修复版 1.11，内部处理）；XLSX showZeroes（#2064，read-excel-file 库内部，依赖已最新）；PPTX None text/chart 容错（#2059/#2194，手写提取器天然无 None 概念，空标题已有 Slide N 兜底）；URI scheme 大小写（#2121，`toLowerCase` 判断 + `/i` 兜底正则原有）；大文件字符集（#2360，本项目恒 UTF-8 `TextDecoder`）；epub/rss/youtube/ipynb/OCR 等 — 本项目不支持这些格式，非本次差距。`npm outdated` 复核：转换相关依赖（mammoth/pdf-parse/read-excel-file/turndown/adm-zip）均无更新可用。
+4. **回归测试** — `convert.test.js` 新增 5 例（20/20 全绿，全量 **108/108**）：BOM 表头剥离、前导空行不毁表、尾随空行跳过、表头后空行跳过且中间空行保留为空行格、全空输入报空结果；用例逐条对应 markitdown 上游 `test_csv_*` 断言。
+
+### 公网团队部署：写权限门控 + 字数统计 + Pad #1 弃用（2026-09-02）
+
+1. **写权限门控（`WRITE_ACCESS_MODE=gated`）** — 公网部署下访客默认只读，持写权限才可编辑。四层模型：访客（读）/ 持令写（口令兑换，7 天滑动续期）/ 信任成员（管理员授予，永久可撤销）/ 管理员（`X-Admin-Token`）。**信任成员白名单替代了「永久后门口令」**：同样免再输口令，但按人可撤销、可审计、无共享密钥永久泄露风险。门控覆盖全部 **12 条写路径（11 条 HTTP + WS patch）**：pads 5（PUT/POST text、create、password、delete）、files 2（delete、clear）、upload、convert、invitations 2。WS 每次 patch 复检，失效发 `{type:'write-denied'}` 并以关闭码 **4405** 关闭。口令常量时间比对（复用 `timingSafeEqual`），生产环境启动自检在 `open` 模式下告警。
+2. **Pad #1 弃用** — 全新部署不再播种公开 Pad #1（其 `owner_user_id=NULL` 在公网下对任何注册者可见）。`seedDefaultPad` 移除，零 Pad 启动；新建 Pad 默认私有（归属创建者）。`deletePad` 的「不能删最后一个 Pad」保护同步放宽。
+3. **昵称** — `users` 表新增 `display_name`；`PATCH /api/auth/me` 设置；成员列表与（后续）在线成员展示用昵称区分成员。
+4. **成员管理 API** — `GET /api/members`、`POST /api/members/:code/write`、`DELETE /api/members/:code/write`（`X-Admin-Token`）；`GET/POST/DELETE /api/write-access/{status,redeem,release}`。
+5. **字数统计重做（参考 Memos / SiYuan）** — 字数 = CJK 字符数 + 英文单词数；阅读时间按中文 400 字/分、英文 200 词/分分别加权；选区统计「选中 N 字 / 共 M 字」；中文文案 + 千分位；输入事件防抖 200ms 避免每次击键全量正则扫描。
+6. **回归测试** — 新增 `tests/write-access.test.js`（9 例：open 不误拦、gated 12 条 HTTP 全 403、WS 4405、口令兑换、admin 授予/撤销、主动释放、成员列表鉴权、只读路径开放、昵称）。测试启动器适配零 Pad：`startServer` 按需 bootstrap 公开 Pad，且 `gated` 场景经 admin token 创建。
+
 ## [1.2.0] - 2026-09-01
 
 ### 协作手感与带宽 / 内存开销修复

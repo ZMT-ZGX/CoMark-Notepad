@@ -3,75 +3,42 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
-const { setTimeout: delay } = require('node:timers/promises');
 const WebSocket = require('ws');
+
+const { PROJECT_DIR, installOriginFetch, getPristineFetch, spawnServer, stopServer } = require('./helpers');
 
 // Wrap global fetch to auto-inject Origin header for state-changing methods.
 // This ensures test requests pass CSRF origin checks without manually adding
 // Origin to every call.
-const _origFetch = globalThis.fetch;
-globalThis.fetch = async (input, init) => {
-  const method = (init?.method || 'GET').toUpperCase();
-  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
-    const url = typeof input === 'string' ? input : input.toString();
-    const headers = { ...(init?.headers || {}) };
-    if (!headers.Origin && !headers.origin) {
-      try {
-        const u = new URL(url);
-        headers.Origin = u.origin;
-      } catch {}
+installOriginFetch();
+
+/**
+ * A fresh install starts with zero pads (the legacy public Pad #1 is no longer
+ * seeded). Most tests below exercise the single-pad topology, so they opt into
+ * creating one; as an anonymous user that yields a public pad with id 1.
+ */
+function startServer(extraEnv = {}, { bootstrap = true } = {}) {
+  return spawnServer(extraEnv).then(async (server) => {
+    if (!bootstrap) return server;
+    try {
+      // Origin must match an explicitly configured PUBLIC_ORIGIN, otherwise the
+      // CSRF check rejects this write.
+      const res = await fetch(`${server.baseUrl}/api/pads`, {
+        method: 'POST',
+        headers: { Origin: extraEnv.PUBLIC_ORIGIN || server.baseUrl },
+      });
+      if (!res.ok) {
+        throw new Error(`bootstrap pad failed: ${res.status} ${await res.text().catch(() => '')}`);
+      }
+    } catch (e) {
+      // Never leak the spawned server: node --test waits for the event loop to
+      // drain, so an orphaned child hangs the whole run instead of just
+      // failing this test.
+      await stopServer(server);
+      throw e;
     }
-    init = { ...init, headers };
-  }
-  return _origFetch(input, init);
-};
-
-const PROJECT_DIR = path.resolve(__dirname, '..');
-
-function startServer(extraEnv = {}) {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collab-identity-'));
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [require.resolve('tsx/cli'), 'src/server.ts'], {
-      cwd: PROJECT_DIR,
-      env: { ...process.env, PORT: '0', DATA_DIR: dataDir, ...extraEnv },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGKILL');
-      reject(new Error(`Timed out.\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 5000);
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-      const match = stdout.match(/Local:\s+http:\/\/localhost:(\d+)/);
-      if (!match || settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve({ child, dataDir, port: Number(match[1]), baseUrl: `http://127.0.0.1:${match[1]}`, wsUrl: `ws://127.0.0.1:${match[1]}` });
-    });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('exit', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(new Error(`Exited early: ${code} ${signal}\n${stdout}\n${stderr}`));
-    });
+    return server;
   });
-}
-
-async function stopServer(server) {
-  await new Promise((resolve) => {
-    if (server.child.exitCode !== null) { resolve(); return; }
-    const t = setTimeout(() => server.child.kill('SIGKILL'), 1000);
-    server.child.once('exit', () => { clearTimeout(t); resolve(); });
-    server.child.kill('SIGINT');
-  });
-  fs.rmSync(server.dataDir, { recursive: true, force: true });
 }
 
 function extractCookie(res) {
@@ -487,8 +454,8 @@ test('missing origin header is allowed (same-origin non-browser)', async () => {
     assert.equal(getRes.status, 200);
 
     // No Origin header on POST request - should be rejected (state-changing methods require Origin)
-    // Use _origFetch to bypass the auto-Origin wrapper
-    const postRes = await _origFetch(`${server.baseUrl}/api/pads/1/password`, {
+    // Use getPristineFetch to bypass the auto-Origin wrapper
+    const postRes = await getPristineFetch()(`${server.baseUrl}/api/pads/1/password`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -712,7 +679,7 @@ test('backward compat: unauthenticated users can access public pads', async () =
     const write = await fetch(`${server.baseUrl}/api/pads/1/text`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: 'hello' }),
+      body: JSON.stringify({ text: 'hello', baseVersion: 0 }),
     });
     assert.equal(write.status, 200);
   } finally {

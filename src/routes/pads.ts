@@ -5,6 +5,8 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { checkOrigin, requirePadUnlock, extractPadTokens } = require('../middlewares/security');
 const { isAdmin } = require('../middlewares/auth');
+const { requireWriteAccess } = require('../middlewares/writeAccess');
+const { safeClose } = require('../ws/close');
 const { BadRequestError } = require('../utils/errors');
 const { validate } = require('../middlewares/validate');
 const { UpdateTextSchema, SetPasswordSchema, UnlockSchema } = require('../validators/pads');
@@ -36,10 +38,12 @@ const publicPadCreateLimiter = rateLimit({
 
 function createRouter(
   padService: any,
-  getPadClients: (padId: number) => Set<CoMarkWebSocket> | undefined
+  getPadClients: (padId: number) => Set<CoMarkWebSocket> | undefined,
+  writeAccessService: any
 ) {
   const router = express.Router();
   const padUnlock = requirePadUnlock(padService);
+  const writeGate = requireWriteAccess(writeAccessService);
 
   // Get pad content
   router.get('/:id', padUnlock, async (req: any, res: any, next: any) => {
@@ -86,6 +90,7 @@ function createRouter(
     '/:id/text',
     writeLimiter,
     checkOrigin,
+    writeGate,
     padUnlock,
     validate(UpdateTextSchema),
     updatePadText
@@ -94,32 +99,40 @@ function createRouter(
     '/:id/text',
     writeLimiter,
     checkOrigin,
+    writeGate,
     padUnlock,
     validate(UpdateTextSchema),
     updatePadText
   );
 
   // Create new pad
-  router.post('/', publicPadCreateLimiter, checkOrigin, async (req: any, res: any, next: any) => {
-    try {
-      const pad = await padService.createPad(req.userId);
-      res.json({
-        id: pad.id,
-        text: '',
-        textVersion: 0,
-        hasPassword: false,
-        ownerUserId: pad.ownerUserId,
-      });
-    } catch (e) {
-      next(e);
+  router.post(
+    '/',
+    publicPadCreateLimiter,
+    checkOrigin,
+    writeGate,
+    async (req: any, res: any, next: any) => {
+      try {
+        const pad = await padService.createPad(req.userId);
+        res.json({
+          id: pad.id,
+          text: '',
+          textVersion: 0,
+          hasPassword: false,
+          ownerUserId: pad.ownerUserId,
+        });
+      } catch (e) {
+        next(e);
+      }
     }
-  });
+  );
 
   // Set/change/remove pad password
   router.post(
     '/:id/password',
     unlockLimiter,
     checkOrigin,
+    writeGate,
     validate(SetPasswordSchema),
     async (req: any, res: any, next: any) => {
       try {
@@ -147,7 +160,7 @@ function createRouter(
   );
 
   // Delete pad (owner/admin can delete even without unlock token)
-  router.delete('/:id', checkOrigin, async (req: any, res: any, next: any) => {
+  router.delete('/:id', checkOrigin, writeGate, async (req: any, res: any, next: any) => {
     try {
       const padId = Number(req.params.id);
       if (!Number.isInteger(padId) || padId <= 0) throw BadRequestError('Invalid pad ID');
@@ -158,9 +171,7 @@ function createRouter(
       const deletedClients = getPadClients(padId);
       if (deletedClients) {
         for (const ws of Array.from(deletedClients) as CoMarkWebSocket[]) {
-          try {
-            ws.close(4404, 'Pad deleted');
-          } catch {}
+          safeClose(ws, 4404, 'Pad deleted');
         }
       }
 

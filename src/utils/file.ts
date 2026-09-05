@@ -1,6 +1,7 @@
 'use strict';
 
 const os = require('os');
+const fsp = require('fs').promises;
 
 function getLanIP() {
   const interfaces = os.networkInterfaces();
@@ -59,10 +60,22 @@ function contentDisposition(disposition: string, filename: string | undefined | 
   return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeRFC5987(name)}`;
 }
 
+// Best-effort unlink: the common failure is ENOENT ("already removed"), and
+// every caller treats a failed removal as non-fatal, so the error handling
+// lives here instead of being repeated at each call site.
+async function safeUnlink(filepath: string): Promise<void> {
+  try {
+    await fsp.unlink(filepath);
+  } catch {
+    /* file may have already been removed */
+  }
+}
+
 module.exports = {
   getLanIP,
   formatBytes,
   downloadBasename,
   encodeRFC5987,
   contentDisposition,
+  safeUnlink,
 };
