@@ -44,7 +44,7 @@ collab-notepad/
 │   │   └── diff_match_patch.js   # Patch-based sync library
 │   └── style.css
 ├── convert-worker.js             # Worker thread: file → Markdown
-├── tests/                        # 108 integration tests (node --test)
+├── tests/                        # 111 integration tests (node --test)
 │   ├── helpers.js                # Shared harness: spawnServer/stopServer/installOriginFetch (NOT a test file)
 │   ├── identity.test.js          # Auth & access control (36)
 │   ├── smoke.test.js             # Core API, WebSocket (31)
@@ -81,7 +81,7 @@ docker compose up -d
 
 ```bash
 npm run typecheck                 # tsc --noEmit
-npm test                          # node --test (108 tests)
+npm test                          # node --test (111 tests)
 npm run lint                      # ESLint
 npm run format                    # Prettier
 npm run test:e2e                  # Playwright (requires build first)
@@ -112,7 +112,7 @@ npm run test:e2e                  # Playwright (requires build first)
 - **CSRF**: Origin header validation with private IP bypass for LAN clients
 - **Pad access**: 3-tier — public (`ownerUserId=null`), private (owner+invited), legacy (admin-only)
 - **Pad unlock tokens**: bearer tokens for password-protected pads; **header only** (`X-Pad-Token`, comma-separated multi-token OK). Never put unlock tokens in query strings (access/proxy logs). Shared helpers: `extractPadTokens` / `hasValidUnlockToken` in `middlewares/security.ts`; client: `padAuthHeaders()` in `public/js/core.js`
-- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10); locked pads auth via first message `{ type: 'auth', padToken }`; every `applyPatch` re-validates `ws.unlockToken` (close **4403** if invalid). Sockets are counted from the `connection` event (pending) through `finalizeConnection` (live) so the 1.5s auth window can't be used to stack invisible connections. **Every close goes through `safeClose()` (`src/ws/close.ts`)** — `ws` throws a synchronous RangeError on reasons longer than 123 bytes, and a throw from inside ws's listeners kills the process (there is no uncaughtException net); never call `ws.close()` directly
+- **WebSocket**: per-pad rooms, 30s ping/pong heartbeat, per-IP connection limit (10); locked pads auth via first message `{ type: 'auth', padToken }`; every `applyPatch` re-validates `ws.unlockToken` (close **4403** if invalid). Sockets are counted from the `connection` event (pending) through `finalizeConnection` (live) so the 1.5s auth window can't be used to stack invisible connections. **Every close goes through `safeClose()` (`src/ws/close.ts`)** — `ws` throws a synchronous RangeError on reasons longer than 123 bytes, and an uncaught throw from inside a ws listener trips the process-level `uncaughtException` net (`server.ts`), which shuts the whole instance down; never call `ws.close()` directly
 - **Write access gate** (`WRITE_ACCESS_MODE=gated`): all write paths run through `requireWriteAccess(writeAccessService)` (factory in `middlewares/writeAccess.ts`; admin check resolved per-request internally) + WS re-check on every patch (`4405`). Locked: 11 HTTP + 1 WS = 12 write paths — a new write endpoint without the gate is a security bug. Client UI: banner (read-only) + header chip (writable: remaining days + release) in `public/js/write-access.js`
 - **Patch sync**: `diff-match-patch` over WS; per-pad shadow + single in-flight op; pad-scoped offline queue in localStorage; clients send `baseVersion` on every patch and the server nacks on mismatch. **`baseVersion` is MANDATORY on both write paths** (WS `patch` and HTTP `PUT/POST /:id/text`): a write that omits it is rejected (WS → `patch-nack`; HTTP → `409` conflict) instead of being applied against whatever the server currently holds. It used to be optional with the check skipped when absent, which made the concurrency control opt-in — any client could disable it by omitting one field and silently clobber a concurrent edit. Regression tests: `tests/concurrency.test.js` **One diff-only frame per edit** — `patch-ack` returns only `{textVersion, seq}` and the broadcast `patch` frame carries only the diff (the receiver rebuilds the body via `patch_apply` on its shadow; HTTP resync covers apply failures). Never put a full body back into these frames: acking a patch implies the server body equals the sender's `sentText`, and echoing bodies costs a full serialization per keystroke per peer
 - **Presence**: `{type:'presence'}` / `{type:'presence-request'}` frames are relay-only — the server stores nothing and runs no timeouts; per-connection 400ms relay throttle, removal via close broadcast + 35s client-side staleness prune. Chips live in `public/js/presence.js`; remote caret overlay in the textarea is deliberately NOT implemented (plain textarea can't host caret overlays)
@@ -125,7 +125,8 @@ npm run test:e2e                  # Playwright (requires build first)
 - **Container limits**: `docker-compose.yml` must use service-level `mem_limit` / `cpus`. `deploy.resources.limits` is only honoured in Swarm mode or with `--compatibility` — on a single self-hosted box it silently does nothing
 - **Logging**: production logs are JSON (pino) with `cookie` / `authorization` / `x-pad-token` / `password` / `token` / `passphrase` / `adminToken` redacted via `redact`. Pad unlock tokens are long-lived bearer credentials — never let them reach the log stream
 - **File lifecycle**: TTL cleanup deletes files past `FILE_TTL_HOURS` **only when no pad body references them** (`files/<id>` substring — deleting a referenced attachment leaves a broken image/link). All unlink/write paths are `fs.promises`; uploads stream to a `.part` sibling and `rename` into place, so never write uploads directly to their final name
-- **WAL + busy_timeout=5000**: SQLite concurrency hardening
+- **WAL + busy_timeout=5000 + synchronous=NORMAL**: SQLite concurrency/durability hardening. NORMAL is deliberate — every keystroke commits, and FULL would fsync the WAL per keystroke; NORMAL trades at-most "lose the last commits on power loss" (never corruption). Keep it unless you can quantify the cost of reverting
+- **Shutdown order**: SIGTERM/SIGINT drain first (flush FTS → `safeClose` all WS → `server.close()` + `closeIdleConnections()`), and SQLite closes **only** inside the drain callback (`store.flushSync()` calls `sqlite.close()` and nulls the handle — closing it before the drain turns every in-flight request into a 500). `unhandledRejection` is logged and survived; `uncaughtException` drains and exits non-zero. Async side tasks (TTL sweep etc.) must `.catch` at the timer, not rely on the net
 - **DB migration**: SQLite-first; legacy `store.json` auto-imported with backup
 
 ## Constraints — Do NOT
@@ -179,7 +180,7 @@ See `.env.example`. Key vars:
 A change is complete when:
 1. All code changes are saved to files
 2. `npm run typecheck` passes (0 errors)
-3. `npm test` passes with exit code 0 (108/108)
+3. `npm test` passes with exit code 0 (111/111)
 4. `npm run lint` passes with no new warnings
 5. If security-related: verify CSRF, auth, CSP, and unlock-token header-only behavior
 6. If frontend: verify in browser at relevant breakpoints (desktop + mobile)

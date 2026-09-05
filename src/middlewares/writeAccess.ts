@@ -26,8 +26,9 @@ function requireWriteAccess(writeAccessService: WriteAccessService) {
         gated: writeAccessService.gated,
       });
     }
-    // Sliding renewal for time-limited grants.
-    writeAccessService.renewIfNeeded(req.userId || null);
+    // Sliding renewal for time-limited grants — reuses the status already in
+    // hand; no second write_grants query per request.
+    writeAccessService.renewFromStatus(req.userId || null, status);
     next();
   };
 }

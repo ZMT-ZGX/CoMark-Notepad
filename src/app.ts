@@ -92,13 +92,8 @@ function createApp(
   });
   app.use('/api/pads/', deleteLimiter);
 
-  // Body parser
-  app.use(express.json({ limit: JSON_BODY_LIMIT }));
-
-  // Authenticate (sets req.userId, never blocks)
-  app.use(authenticate);
-
-  // Prevent iOS Safari from caching HTML (ensures fresh CSS/JS refs)
+  // Prevent iOS Safari from caching HTML (ensures fresh CSS/JS refs). Must
+  // run before static: serve-static only sets Cache-Control when none exists.
   app.use((req: any, res: any, next: any) => {
     if (req.path === '/' || req.path.endsWith('.html')) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -106,9 +101,18 @@ function createApp(
     next();
   });
 
-  // Static files (public/ and vendored browser libs)
+  // Static files before body parsing and session auth: page assets (JS/CSS/
+  // images, vendored libs) are public by construction, and routing them
+  // through authenticate would cost every request a cookie parse + HMAC check
+  // + users-table lookup for nothing. public/ already contains public/vendor,
+  // so no separate /vendor mount is needed.
   app.use(express.static(path.join(__dirname, '..', 'public')));
-  app.use('/vendor', express.static(path.join(__dirname, '..', 'public', 'vendor')));
+
+  // Body parser
+  app.use(express.json({ limit: JSON_BODY_LIMIT }));
+
+  // Authenticate (sets req.userId, never blocks)
+  app.use(authenticate);
 
   // Full-text search (FTS5) — scoped to pads the current user can access
   app.get('/api/search', (req: any, res: any, next: any) => {

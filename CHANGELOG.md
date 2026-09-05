@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### 健壮性与每请求开销修复（代码级审查落地）
+
+1. **优雅关停顺序修复（正确性）** — 原先 `store.flushSync()`（其内部是 `sqlite.close()`，会把 DB 句柄置 null）在排空请求**之前**执行：SIGTERM 后最长 5 秒的排空窗口内，任何在途请求再碰数据库都会得到 `null.prepare` TypeError → 500。现在 SQLite 只在 `server.close()` 排空回调内关闭，FTS flush 仍在关库前（库还开着时）执行；排空时补 `closeIdleConnections()`，keep-alive 空闲连接不再把 `server.close()` 拖到 5 秒硬超时。
+2. **进程级异常兜底** — 新增 `unhandledRejection`（记录、不退出：TTL 清理这类异步旁路任务的失败不应拖垮整个实例）与 `uncaughtException`（走同一套排空流程、以非零码退出）处理器。文件 TTL 定时任务补上 `.catch`——此前一次 `SQLITE_BUSY`/IO 错误就会以 unhandled rejection 杀死进程（Node ≥15 默认行为）。
+3. **转换 worker 内存峰值 ≈5× → 1×** — `convert-worker.js` 里九处 `Buffer.from(buffer)`（PDF/XLSX/DOCX/PPTX/图片路径、zip 预检、文本解码）都在结构化克隆副本之外又堆上第二份全量拷贝，100MB 输入峰值内存约 500MB，直接顶穿 worker 堆上限导致大文件转换必然 OOM。全部改为按引用使用（`buffer` 本身是只读的克隆副本；PDF 路径用 `Uint8Array` 视图替代拷贝），峰值回落到克隆本身。
+4. **gated 模式每击键 2 次 `write_grants` 查询 → 1 次** — `requireWriteAccess`（HTTP）与 WS patch 复检原先各自执行 `status()` + `renewIfNeeded()`，两次 SELECT 查同一行。滑动续期改为 `renewFromStatus(userId, status)`，直接复用刚算出的 status，不再回库。
+5. **锁定 Pad 的请求不再为读一个布尔值拖出全文** — `requirePadUnlock` 原先走 `findById`（`SELECT *`，含最多 100KB 正文）只为检查 `pad.password`。新增 `padService.getPadMetaById`（`findByIdMeta`），并且 **meta 查询补上 `text_version` 列**——此前 `rowToPadMeta` 返回恒为 0 的 `textVersion`（类型上是完整 `Pad`，实则靠约定防雷），现在 meta 行可以如实回答"这个 Pad 在第几版"，条件更新检查不再依赖全文行。
+6. **静态资源不再过会话鉴权** — `express.static` 移到 body parser 与 `authenticate` 之前：此前页面加载的每个 JS/CSS/图片请求都要付 cookie 解析 + HMAC 校验 + `users` 表查询。同时删除挂在 `/vendor` 的冗余静态挂载（`public/` 已包含 `public/vendor`）。
+7. **SQLite `synchronous=NORMAL`（WAL 标准搭配）** — 此前每击键提交都 FULL fsync；NORMAL 下掉电最多丢最近提交、不会损坏库。
+8. **杂项** — 文件 TTL 清理的兜底 Pad 查找改用 `findAllMeta()`（原先 `findAll()` 会把全部 Pad 正文拉进内存），无 Pad 可广播时静默跳过；启动日志的 Pad 计数改用 `count()`。
+9. **回归测试** — `tests/concurrency.test.js` 新增「同一 `operationId` 重试必须按重复处理而非 nack」用例（ACK 丢失重发场景：去重表必须在版本检查前短路，重复投递不得再次推进版本）。
+
 ## [1.2.3] - 2026-09-05
 
 ### 同步协议瘦身 + FTS 节流 + 文件生命周期修复（竞品代码级分析落地）

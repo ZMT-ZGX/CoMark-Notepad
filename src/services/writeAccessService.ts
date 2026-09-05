@@ -190,18 +190,18 @@ class WriteAccessService {
 
   /**
    * Sliding renewal: push the expiry back to a full TTL once the remaining
-   * life drops below the threshold. Called on accepted writes only, and only
-   * writes when the threshold is crossed, so it costs nothing in the common
-   * case.
+   * life drops below the threshold. Takes the status the caller just computed
+   * (HTTP gate / WS patch re-check) instead of re-querying write_grants — the
+   * naive pair status() + renewIfNeeded() cost two SELECTs per keystroke in
+   * gated mode. Called on accepted writes only, and only writes when the
+   * threshold is crossed, so it costs nothing in the common case.
    */
-  renewIfNeeded(userId: string | null): void {
-    if (!this.gated || !userId) return;
-    const grant = this.store.findWriteGrant(userId);
-    if (!grant || grant.expiresAt == null) return;
-    const now = Date.now();
-    const remaining = grant.expiresAt - now;
+  renewFromStatus(userId: string | null, status: WriteAccessStatus): void {
+    if (!this.gated || !userId || !status.allowed) return;
+    if (status.expiresAt == null) return; // permanent grant — nothing to renew
+    const remaining = status.expiresAt - Date.now();
     if (remaining > this.renewThresholdDays * DAY_MS) return;
-    this.store.touchWriteGrant(userId, now + this.ttlDays * DAY_MS);
+    this.store.touchWriteGrant(userId, Date.now() + this.ttlDays * DAY_MS);
   }
 
   /** Members and their grants, for the admin member-management view. */

@@ -73,7 +73,9 @@ function handlePatch(ws: CoMarkWebSocket, msg: WsPatchMessage, deps: PatchDeps):
       safeClose(ws, 4405, 'Write access required');
       return;
     }
-    writeAccessService.renewIfNeeded(ws.userId || null);
+    // Sliding renewal — reuses writeStatus (one write_grants SELECT per patch,
+    // not two).
+    writeAccessService.renewFromStatus(ws.userId || null, writeStatus);
   }
 
   // Per-connection patch rate limit (DoS hardening — HTTP writes go

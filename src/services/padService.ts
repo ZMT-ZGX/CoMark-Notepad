@@ -104,6 +104,11 @@ class PadService {
     return this.store.findPadById(padId) || null;
   }
 
+  /** Metadata-only lookup (no body read) — lock/permission checks. */
+  getPadMetaById(padId: number): Pad | null {
+    return this.store.findPadMetaById(padId) || null;
+  }
+
   async getPad(userId: string | null, padId: number): Promise<Pad> {
     const pad = this.store.findPadById(padId);
     if (!pad) throw NotFoundError('Pad not found');

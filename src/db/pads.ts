@@ -17,10 +17,13 @@ function findAll(): Pad[] {
   return db.prepare('SELECT * FROM pads ORDER BY id').all().map(rowToPad);
 }
 
-// Columns needed for listing and permission decisions. Deliberately excludes
-// `text`, which is up to 100KB per pad: reading every body just to render the
-// sidebar or to gate a search result pulled megabytes into memory per request.
-const META_COLUMNS = 'id, password, created_at, owner_user_id, creator_code';
+// Columns needed for listing, lock checks and permission/version decisions.
+// Deliberately excludes `text`, which is up to 100KB per pad: reading every
+// body just to render the sidebar or to gate a search result pulled megabytes
+// into memory per request. `text_version` IS included — a meta row must be
+// able to answer "what version is this pad on" (e.g. the conditional-update
+// check) without dragging the body out of SQLite.
+const META_COLUMNS = 'id, password, created_at, owner_user_id, creator_code, text_version';
 
 function findByIdMeta(id: number): Pad | undefined {
   const db = sqlite.getDb();
@@ -61,7 +64,7 @@ function updateText(id: number, text: string): Pad | null {
   const row = db
     .prepare(
       `UPDATE pads SET text = ?, text_version = text_version + 1 WHERE id = ?
-       RETURNING ${META_COLUMNS}, text_version`
+       RETURNING ${META_COLUMNS}`
     )
     .get(text, id);
   if (!row) return null;
@@ -241,14 +244,15 @@ function rowToPad(row: any): Pad {
   };
 }
 
-// Used for the metadata-only queries. `text` / `textVersion` are intentionally
-// empty: these rows exist for listing and permission checks only, and any code
-// that needs the document body must go through findById / findAll.
+// Used for the metadata-only queries. `text` is intentionally empty: these
+// rows exist for listing, lock checks and permission decisions, and any code
+// that needs the document body must go through findById / findAll. Unlike
+// `text`, `textVersion` carries the real value (see META_COLUMNS).
 function rowToPadMeta(row: any): Pad {
   return {
     id: row.id,
     text: '',
-    textVersion: 0,
+    textVersion: row.text_version ?? 0,
     password: row.password ?? null,
     createdAt: row.created_at,
     ownerUserId: row.owner_user_id ?? null,

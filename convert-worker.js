@@ -24,7 +24,9 @@ function conversionInputError(message) {
 }
 
 function decodeText(buffer) {
-  return TEXT_DECODER.decode(Buffer.from(buffer));
+  // Buffer is a Uint8Array — decode() reads it in place. Buffer.from would
+  // copy the whole body for nothing.
+  return TEXT_DECODER.decode(buffer);
 }
 
 // ── MIME / content sniffing ─────────────────────────────────────────────────
@@ -34,7 +36,13 @@ function decodeText(buffer) {
  * Returns { ext: '.pdf', mime: 'application/pdf' }
  */
 function detectFileType(buffer, originalName, mimeType) {
-  const buf = Buffer.from(buffer);
+  // Zero-copy discipline for this worker: `buffer` is the structured-clone
+  // copy handed to us via workerData and is treated as read-only everywhere,
+  // so every consumer below takes it by reference. Buffer.from(buffer) here
+  // (and at the mammoth/adm-zip/read-excel-file call sites) would put a second
+  // full copy of a possibly-100MB input on the heap and blow the worker's
+  // resourceLimits.
+  const buf = buffer;
   const ext = (originalName && originalName.match(/\.([^.]+)$/) || [])[1] || '';
   const extL = ext.toLowerCase();
 
@@ -416,7 +424,10 @@ function isTitleShape(shapeXml) {
 async function convertPdf(buffer) {
   // pdf-parse v2 exposes a PDFParse class (v1's default-export function was
   // removed). Construct with { data }, call getText(), then release resources.
-  const parser = new PDFParse({ data: new Uint8Array(Buffer.from(buffer)) });
+  // The Uint8Array is a view over the buffer, not another full copy.
+  const parser = new PDFParse({
+    data: new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+  });
   try {
     const result = await parser.getText();
     return result.text || '';
@@ -511,11 +522,11 @@ function inflateRawCount(raw, cap) {
 async function assertSafeArchive(buffer, label) {
   let zip;
   try {
-    zip = new AdmZip(Buffer.from(buffer));
+    zip = new AdmZip(buffer);
   } catch {
     throw conversionInputError(`${label}: not a readable ZIP archive`);
   }
-  const buf = Buffer.from(buffer);
+  const buf = buffer;
   const entries = zip.getEntries();
   if (entries.length > MAX_ARCHIVE_ENTRIES) {
     throw conversionInputError(`${label}: too many archive entries (${entries.length})`);
@@ -563,13 +574,13 @@ async function assertSafeArchive(buffer, label) {
 
 async function convertDocx(buffer) {
   await assertSafeArchive(buffer, 'DOCX');
-  const result = await mammoth.convertToHtml({ buffer: Buffer.from(buffer) });
+  const result = await mammoth.convertToHtml({ buffer });
   return htmlToMarkdown(result.value);
 }
 
 async function convertXlsx(buffer) {
   await assertSafeArchive(buffer, 'XLSX');
-  const sheetsResult = await readExcelFile(Buffer.from(buffer), { sheet: 'all' });
+  const sheetsResult = await readExcelFile(buffer, { sheet: 'all' });
   return sheetsResult
     .map(({ sheet, data }) => {
       const table = rowsToMarkdownTable(data || []);
@@ -581,7 +592,7 @@ async function convertXlsx(buffer) {
 
 async function convertPptx(buffer) {
   await assertSafeArchive(buffer, 'PPTX');
-  const zip = new AdmZip(Buffer.from(buffer));
+  const zip = new AdmZip(buffer);
   const entries = zip.getEntries();
 
   // Collect and sort slide entries
@@ -735,7 +746,7 @@ function extractImageDimensions(buf) {
 }
 
 async function convertImage(buffer, originalName) {
-  const buf = Buffer.from(buffer);
+  const buf = buffer;
   const dims = extractImageDimensions(buf);
 
   const lines = [
@@ -820,7 +831,15 @@ async function convert(buffer, ext, mimeType, originalName) {
 
 (async () => {
   try {
-    const { buffer, ext, mimeType, originalName } = workerData;
+    const { buffer: raw, ext, mimeType, originalName } = workerData;
+    // Structured clone delivers the main thread's Buffer as a plain
+    // Uint8Array, but everything below (readUInt32BE, slice, indexOf, AdmZip,
+    // mammoth…) needs a real Buffer. Buffer.from(arrayBuffer, byteOffset,
+    // length) returns a view over the clone's memory — the input is never
+    // copied a second time.
+    const buffer = Buffer.isBuffer(raw)
+      ? raw
+      : Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
     const markdown = ensureOutputSize(await convert(buffer, ext, mimeType, originalName));
     parentPort.postMessage({ ok: true, markdown });
   } catch (e) {

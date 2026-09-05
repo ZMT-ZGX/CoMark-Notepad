@@ -287,8 +287,10 @@ export interface DataStore {
 
   // Pad
   findPadById(id: number): Pad | undefined;
+  // Metadata only — omits `text` but carries the real `textVersion`, for
+  // listing, lock checks and permission/version decisions.
+  findPadMetaById(id: number): Pad | undefined;
   findAllPads(): Pad[];
-  // Metadata only — omits `text` / `textVersion`, for listing and permissions.
   findAllPadMeta(): Pad[];
   countPads(): number;
   padExists(id: number): boolean;

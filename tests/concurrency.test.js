@@ -219,6 +219,60 @@ test('WS handshake without Origin is allowed only when explicitly opted in', asy
   }
 });
 
+test('a retried patch with the same operationId is deduplicated, not double-applied', async () => {
+  const server = await startServer();
+  try {
+    const seeded = await getPad(server.baseUrl);
+    await putText(server.baseUrl, 1, { text: 'Hello', baseVersion: seeded.textVersion });
+
+    const client = await createClient(server.wsUrl, 1);
+    await waitForMessage(client, (m) => m.type === 'hello');
+    client.drain();
+
+    const before = await getPad(server.baseUrl);
+    // One frame, sent twice: the second send models a client retry after a
+    // lost ACK. The receipt table must short-circuit before the version check
+    // — nacking the retry would wedge the client even though its edit landed.
+    const frame = JSON.stringify({
+      type: 'patch',
+      padId: 1,
+      data: makePatch('Hello', 'Hello World'),
+      baseVersion: before.textVersion,
+      operationId: 'op-dedup-regression',
+    });
+
+    client.socket.send(frame);
+    const first = await waitForMessage(
+      client,
+      (m) => m.type === 'patch-ack' || m.type === 'patch-nack'
+    );
+    assert.equal(first.type, 'patch-ack', 'the first delivery must apply');
+
+    client.socket.send(frame);
+    const retry = await waitForMessage(
+      client,
+      (m) => m.type === 'patch-ack' || m.type === 'patch-nack'
+    );
+    assert.equal(
+      retry.type,
+      'patch-ack',
+      'a retried operationId must be acknowledged as a duplicate, not nacked'
+    );
+
+    const after = await getPad(server.baseUrl);
+    assert.equal(after.text, 'Hello World');
+    assert.equal(
+      after.textVersion,
+      before.textVersion + 1,
+      'the duplicate delivery must not bump the version again'
+    );
+
+    await closeClient(client);
+  } finally {
+    await stopServer(server);
+  }
+});
+
 test('HTTP full-text write without baseVersion must conflict, not overwrite', async () => {
   const server = await startServer();
   try {

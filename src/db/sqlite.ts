@@ -117,6 +117,11 @@ function open(): any {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
+  // WAL + NORMAL: a commit no longer forces a full fsync (the WAL is only
+  // synced at checkpoints). A power loss may lose the most recent commits but
+  // cannot corrupt the database — the standard trade for a write-heavy editor
+  // where every keystroke commits.
+  db.pragma('synchronous = NORMAL');
   // The per-update FTS trigger was removed in favour of a throttled sync
   // (every keystroke re-tokenized the whole body through the trigram
   // tokenizer). Older databases still carry the trigger, and leaving it in

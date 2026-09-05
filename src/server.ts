@@ -86,29 +86,50 @@ async function start() {
         safeUnlink(path.join(db.FILES_DIR, file.filename))
       )
     );
-    const defaultPadId = db.pads.findAll()[0]?.id || 1;
+    const defaultPadId = db.pads.findAllMeta()[0]?.id;
     for (const file of expired) {
       const filePadId = file.padId || defaultPadId;
+      if (filePadId == null) continue;
       broadcast.toPad(filePadId, { type: 'file-deleted', padId: filePadId, fileId: file.id });
     }
     logger.info(`Cleaned up ${expired.length} expired file(s) (TTL=${FILE_TTL_HOURS}h)`);
   }
 
-  const fileTtlTimer = setInterval(cleanupExpiredFiles, FILE_TTL_CHECK_INTERVAL_MS);
+  const fileTtlTimer = setInterval(
+    () =>
+      cleanupExpiredFiles().catch((err: Error) => logger.warn({ err }, 'File TTL cleanup failed')),
+    FILE_TTL_CHECK_INTERVAL_MS
+  );
   fileTtlTimer.unref?.();
 
   // --- Graceful shutdown ---
-  function gracefulShutdown(signal: string) {
+  // A throw from an async side task (SQLITE_BUSY during the hourly TTL sweep,
+  // a failing unlink) must not take the instance down: rejections from the
+  // timers above are caught at their source, and anything that slips through
+  // is logged here. An uncaughtException is different — synchronous state is
+  // no longer trusted, so it goes through the same drain but exits non-zero.
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'Unhandled promise rejection');
+  });
+
+  let shuttingDown = false;
+  function gracefulShutdown(signal: string, exitCode = 0) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info(`${signal} received, shutting down...`);
     clearInterval(heartbeatTimer);
     clearInterval(fileTtlTimer);
     clearInterval(padService.getCleanupTimer());
     clearInterval(session.getCleanupTimer());
+
     // Persist any FTS refreshes the throttle still held in memory so search
-    // is not stale until the next boot-time rebuild.
-    db.pads.flushSearchSyncNow();
-    // Close SQLite database (backward-compat method name from JSON store era)
-    db.store.flushSync();
+    // is not stale until the next boot-time rebuild. Runs while the database
+    // is still open — the close itself happens after the drain below.
+    try {
+      db.pads.flushSearchSyncNow();
+    } catch (err) {
+      logger.error({ err }, 'FTS flush on shutdown failed');
+    }
 
     // Close all WebSocket connections
     try {
@@ -118,14 +139,28 @@ async function start() {
     } catch {}
 
     server.close(() => {
+      // Close SQLite only after the drain: requests still in flight during
+      // the close window must not find the database already shut.
+      try {
+        db.store.flushSync();
+      } catch (err) {
+        logger.error({ err }, 'SQLite close on shutdown failed');
+      }
       logger.info('Server closed.');
-      process.exit(0);
+      process.exit(exitCode);
     });
+    // Idle keep-alive sockets would otherwise hold server.close() open until
+    // the hard timeout; dropping them lets the drain finish immediately.
+    (server as any).closeIdleConnections?.();
     setTimeout(() => process.exit(1), 5000).unref();
   }
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('uncaughtException', (err: Error) => {
+    logger.error({ err }, 'Uncaught exception, shutting down');
+    gracefulShutdown('uncaughtException', 1);
+  });
 
   server.on('close', () => {
     clearInterval(heartbeatTimer);
@@ -150,7 +185,7 @@ async function start() {
     logger.info('CoMark-Notepad is running!');
     logger.info(`  Local:   http://localhost:${currentPort}`);
     logger.info(`  Network: ${url}`);
-    const padCount = db.pads.findAll().length;
+    const padCount = db.pads.count();
     logger.info(`  Pads:    ${padCount}`);
 
     // NOTE: this reads process.env directly rather than the exported

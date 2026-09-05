@@ -96,7 +96,9 @@ function requirePadUnlock(
   return (req, res, next) => {
     const padId = padIdResolver ? padIdResolver(req) : Number(req.params.id);
     if (!Number.isInteger(padId) || padId <= 0) return next(); // let route handle validation
-    const pad = padService.getPadById(padId);
+    // Meta lookup: the lock check only needs `password`, not the (up to
+    // 100KB) pad body that findById would drag out on every locked-pad write.
+    const pad = padService.getPadMetaById(padId);
     if (!pad || !pad.password) return next(); // no lock — proceed
     const tokens = extractPadTokens(req);
     if (!hasValidUnlockToken(padService, tokens, pad.id)) {

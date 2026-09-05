@@ -31,6 +31,7 @@ interface DbModule {
   FILES_DIR: string;
   pads: {
     findById(id: number): any;
+    findByIdMeta(id: number): any;
     findAll(): any[];
     findAllMeta(): any[];
     count(): number;
@@ -88,6 +89,9 @@ class SqliteDataStore implements DataStore {
   // ── Pad ────────────────────────────────────────────────────────
   findPadById(id: number) {
     return this.db.pads.findById(id);
+  }
+  findPadMetaById(id: number) {
+    return this.db.pads.findByIdMeta(id);
   }
   findAllPads() {
     return this.db.pads.findAll();
