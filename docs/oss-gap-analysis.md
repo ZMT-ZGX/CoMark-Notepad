@@ -112,10 +112,10 @@
 **改进建议**
 | 优先级 | 动作 |
 |---|---|
-| **P0** | 补 `LICENSE`（MIT 全文），并让 `package.json.license` 与实际一致 |
+| **P0** | ~~补 `LICENSE`（MIT 全文），并让 `package.json.license` 与实际一致~~ ✅ 已完成（v1.2.4：LICENSE + README License 章节与 badge） |
 | **P0** | 补 `CONTRIBUTING.md`（开发/测试/提交规范）+ `.github/ISSUE_TEMPLATE/` + `PULL_REQUEST_TEMPLATE.md` |
 | **P1** | 补 `SECURITY.md`（漏洞披露渠道、支持版本、响应 SLA） |
-| **P1** | README 顶部加 badge：CI / License / Node / Release |
+| **P1** | ~~README 顶部加 badge：CI / License / Node / Release~~ ✅ 已完成（v1.2.4） |
 | **P1** | 补 `package.json` 的 `repository` / `homepage` / `author` 字段（当前全为 `undefined`，`npm` 页面无仓库入口） |
 | **P2** | 明确 README 首屏定位与截图/GIF（对标项目首页均有产品截图，本项目无） |
 | **P2** | 发版自动化（release-please / semantic-release）+ GitHub Release + tag |
@@ -155,7 +155,7 @@
 **改进建议**
 | 优先级 | 动作 |
 |---|---|
-| **P0** | LICENSE 文件 |
+| **P0** | ~~LICENSE 文件~~ ✅ 已完成（v1.2.4） |
 | **P1** | `CONTRIBUTING.md`：本地启动、测试命令、提交信息规范、PR 流程 |
 | **P1** | `docs/adr/`：至少 3 篇 —— ① 同步协议选型（DMP vs CRDT）② 存储选型（SQLite vs Postgres）③ 权限模型（三层访问 + 写权限门控） |
 | **P2** | `docs/OBSERVABILITY.md`：日志字段、`/api/health` vs `/api/health/ready` 语义、备份恢复步骤、常见故障排查 |

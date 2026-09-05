@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### 开源合规：MIT 许可证落地
+
+1. **`LICENSE` 文件（MIT 全文）** — 此前 README 写 "MIT"、`package.json.license` 也是 "MIT"，但仓库内无许可证文件，法律上不构成有效授权（开源成熟度对标中的 P0 硬阻断）。补入标准 MIT 全文，版权行 `Copyright (c) 2026 ZMT-ZGX`。
+2. **README License 章节升级 + 顶部 badge** — License 章节改为链接到 LICENSE 文件并标注版权人；顶部新增 CI / License / Node >=18 / Release（GitHub tag）四个真实状态 badge。
+
 ## [1.2.4] - 2026-09-06
 
 ### 热路径收尾 + 前端资产自托管（2026-09-06）
