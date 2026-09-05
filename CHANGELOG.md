@@ -2,7 +2,25 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.4] - 2026-09-06
+
+### 热路径收尾 + 前端资产自托管（2026-09-06）
+
+1. **WS patch 路径不再每击键重读全文（per-pad 正文缓存）** — `applyPatch` 每次都要从 SQLite `SELECT *` 整行物化最多 100KB 正文当 patch 基底，但该基底必然等于上一笔 `updatePadText` 写入的正文。新增 `db/pads.ts` 进程内 per-pad 正文缓存（Pad 上限 `MAX_PADS=50`，界约 5MB；`updateText` 写入即刷新、`updatePassword`/`remove` 失效；调用方恒收到浅拷贝、不与缓存条目共享可变对象）。SQLite 行仍是唯一真相源——SIGKILL 后新进程首次读即重建，与"只允许索引滞后"的既有契约一致。回归测试：HTTP 写入 ↔ WS patch 双向交错后 patch 基底必须与已提交正文一致。
+2. **`prepareCached` 语句缓存（`sqlite.ts`）** — `db.prepare()` 每次调用都重新编译 SQL，对每击键/每请求级语句是纯开销（search snippet 此前已单独享受过该待遇）。统一提供 per-handle 的编译缓存，套用到热语句：`pads.findById/findByIdMeta/findAllMeta/count/updateText/updatePassword/remove`、`users.exists/findByCode`（auth 中间件每请求）、`files.findById`（每文件访问检查）、`writeGrants.findByUser/touch`（gated 模式每击键）。调用方必须在函数体内懒调用（`getDb()` 在 open 前为 null）。
+3. **HTTP 全文 PUT 的版本检查降级为 meta 读** — `padService.updateText` 原先为比较一个整数整行读出正文；改走 `findPadMetaById`，仅 409 冲突路径（客户端需要权威正文做合并）才回读全文。
+4. **前端 CDN 依赖清零（全部自托管）** — marked / DOMPurify / hotkeys-js / AlloyFinger 从 jsdelivr 移入 `public/vendor/`（与既有 `diff_match_patch.js` 同模式）。文件与原先 SRI 固定的 jsdelivr 版本**逐字节一致**（下载后 sha384 与原 `integrity` 属性逐一核对）。LAN-first 工具在断网环境下不再丢失预览/净化/快捷键/手势；CSP `script-src` 相应收紧为 `'self'`，被入侵的 CDN 无法再向页面注入脚本。回归测试：页面 HTML 不得再含 CDN 引用、5 个 vendor 资产必须本地可服务、`script-src 'self'` header 断言。
+5. **padFileRefs 批量 flush 的 id 长度查询提升到整批一次** — 原 `refresh()` 每个 Pad 查一次 `SELECT DISTINCT LENGTH(id)`，同一 flush 批内重复；现由调用方（节流 flush / 启动重建）算一次传入。
+
+### 安全遗留清欠（2026-09-06）
+
+> 上一轮评审的「已知问题（如实记录，未修）」与旧 code-review 报告的遗留项清欠。经逐项核实：存储配额竞态（①）实际已由 v1.2.3 的 `storageQuota` 预留账本修复，原注记未同步；本轮实际落地 ②、S9「公开 Pad #1 收纳」与旧审查 M1 三项。
+
+1. **TTL 引用检查改走 `pad_file_refs` junction 表（原已知问题 ②）** — 小时级 TTL 清理原先对**每个**过期候选执行一次 `instr(p.text, 'files/' || files.id)` 全扫全部 Pad 正文（O(过期数 × Pad 数 × 正文体积)，全部在事件循环上同步执行），Pad 与文件积累后单次清理可拖慢事件循环数秒。新增 `pad_file_refs(pad_id, file_id)` 连接表（`db/padFileRefs.ts`）：随 FTS 同一道**节流 flush** 刷新（同一事务、同一 retry-then-drop 契约）、启动时随 `reconcileSearchIndex()` 一并重建、Pad 删除经 `pad_frd` 触发器清边。TTL 扫描改为索引查询前先同步排空待刷新队列（`flushSearchSyncNow`），确保引用边不落后于刚写入的正文——防抖窗口内新加的引用依然保护文件。**裸 `files/<id>` 子串匹配语义逐字保留**（含「短 id 命中长 token 也算被引用」的安全方向），提取侧按现有文件 id 长度集合解析前缀候选，与原 `instr` 行为等价。
+2. **旧库公开 Pad 启动告警（部署计划 S9「公开 Pad #1 收纳」）** — 新部署已不再播种 Pad #1，但旧库若仍带有 `owner_user_id=NULL` 的公开 Pad，公网部署下任何注册用户都可读、且可管理无主上传。生产模式（`NODE_ENV=production`）启动时检测并告警，列出 Pad id 与处置选项（admin API 删除 / 设口令锁定）；不做静默迁移——内容是运营者的数据，去留由人决定。
+3. **CSP `connect-src` 收紧为 `'self'`（旧 code-review M1）** — 原先 `["'self'", 'ws:', 'wss:']` 里的裸 `ws:`/`wss:` 允许向**任意主机**发起 socket 连接；客户端唯一会连的就是同源 WS（CSP3 下 `'self'` 本就覆盖同源 ws/wss），WS 握手另有 Origin 校验。纯纵深防御收紧。
+4. **文档更正** — v1.2.3 评审记录里的「已知问题 ①（存储配额 check-then-act 竞态）」实际已由同版本落地的 `storageQuota` 预留账本修复（upload 与 convert 两条写路径都在同一同步块内预留字节，并发请求互相可见），原「未修」注记予以更正；`docs/public-deployment-plan.md` S9 表两项标记完成。
+5. **回归测试** — 新增 3 例（全量 **114/114**）：junction 随运行时编辑记录/清除引用边、跨 Pad 引用经 `pad_frd` 触发器随 Pad 删除清边、重启后 TTL 扫描保护运行时写入的引用并回收无主过期文件、`connect-src 'self'` header 断言。
 
 ### 健壮性与每请求开销修复（代码级审查落地）
 
@@ -78,7 +96,7 @@ All notable changes to this project are documented in this file. Versions follow
 1. **转换属破坏性写，非读（权限缺口）** — `convertService.convert` 此前只做 `canAccessFile`（读级）检查，但转换成功后 `removeFile` + `unlink` **删除源文件**：持写权限用户可把他人上传转换掉，绕过 `deleteFile` 的 `canManagePad` 门控。现增加破坏性写门控：Pad 管理者（owner/admin）恒可；上传者本人可（转换自己的上传）；无主 legacy 上传同 `deleteFile` 放宽（登录即可）；匿名 403。回归测试：`security.test.js` 新增「跨用户转换被 403 拒绝且源文件原样存活」（当时全量 103/103，最终全量见下方 markitdown 同步条目）。
 2. **转换配额旁路** — 转换产物是新 `files` 行（≤50MB 输出上限），此前**不经过**实例/按账户配额：反复转换可绕过 `MAX_STORAGE_BYTES`。现于**磁盘写入前**复检实例 + 按账户配额（复用上传语义，`resolveFileOwner` 归属），超限 413 `STORAGE_QUOTA`；被拒转换不留孤儿 md、不改源文件。
 
-> **已知问题（本节如实记录，未修）**：① 存储配额 check-then-act 竞态——`sumFileBytes` → `await rename` → `createFile` 间让出事件循环，两个并发上传可双双通过配额检查（上传限流 20/15min/IP + 单文件 100MB + 默认 2GB，实际风险低；彻底修复需把 sum+insert 事务化）；② `findExpired` 对每个过期候选做 `pads.text` 全扫（50 Pad × 100KB ≈ 5MB/候选，每小时同步执行，数据增长后可拖慢事件循环数秒；结构修复需 `pad_file_refs` junction 表）；③ gated 模式下管理员经 WS 无法编辑——浏览器无法在 WS 握手携带 `X-Admin-Token`，管理员需兑换口令写权限（fail-closed，故无安全缺口）。
+> **已知问题（本节如实记录；后续处置见「安全遗留清欠 2026-09-06」）**：① 存储配额 check-then-act 竞态——`sumFileBytes` → `await rename` → `createFile` 间让出事件循环，两个并发上传可双双通过配额检查（**已修**：v1.2.3 同版落地的 `storageQuota` 预留账本在检查所在同步块内预留字节，并发上传/转换互相可见，本条原注记漏记了该修复）；② `findExpired` 对每个过期候选做 `pads.text` 全扫（50 Pad × 100KB ≈ 5MB/候选，每小时同步执行，数据增长后可拖慢事件循环数秒；**已修**：`pad_file_refs` junction 表，见「安全遗留清欠 2026-09-06」）；③ gated 模式下管理员经 WS 无法编辑——浏览器无法在 WS 握手携带 `X-Admin-Token`，管理员需兑换口令写权限（fail-closed，故无安全缺口；属有意保留的限制）。
 
 ### 转换器同步：markitdown v0.1.6 → v0.1.8b1（CSV 修复落地，2026-09-04）
 

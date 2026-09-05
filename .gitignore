@@ -25,3 +25,4 @@ tests/e2e/.e2e-data-dir
 .obsidian/
 skills-lock.json
 *.base
+.ai-memory/

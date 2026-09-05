@@ -1377,3 +1377,242 @@ test('TTL cleanup deletes expired unreferenced files but keeps pad-referenced on
     else fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('file reference junction tracks runtime edits and drops edges on pad deletion', async () => {
+  const Database = require('better-sqlite3');
+  // ADMIN_TOKEN must be set explicitly: pad 2 is created anonymously, so only
+  // an admin may delete it (no owner, no creator code).
+  const server = await startServer({ FTS_SYNC_DEBOUNCE_MS: '100', ADMIN_TOKEN: 'admin123' });
+  const dbPath = path.join(server.dataDir, 'store.db');
+  let fileA;
+  let fileB;
+  let pad2Id = null;
+  try {
+    const upload = async (name, content) => {
+      const formData = new FormData();
+      formData.append('padId', '1');
+      formData.append('file', new Blob([content], { type: 'text/plain' }), name);
+      const res = await fetchJson(server.baseUrl, '/api/upload', { method: 'POST', body: formData });
+      assert.equal(res.response.status, 200);
+      return res.body;
+    };
+    fileA = await upload('junction-a.txt', 'a\n');
+    fileB = await upload('junction-b.txt', 'b\n');
+
+    // The junction rides the debounced derived-index flush, so read it
+    // externally (readonly WAL connection) after the debounce window.
+    const readRefs = (padId) => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return db
+          .prepare('SELECT file_id FROM pad_file_refs WHERE pad_id = ? ORDER BY file_id')
+          .all(padId)
+          .map((r) => r.file_id);
+      } finally {
+        db.close();
+      }
+    };
+
+    const putText = async (padId, text, baseVersion) => {
+      const res = await fetchJson(server.baseUrl, `/api/pads/${padId}/text`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, baseVersion }),
+      });
+      assert.equal(res.response.status, 200, JSON.stringify(res.body));
+      return res.body.textVersion;
+    };
+
+    // Reference A from pad 1: the flush must record exactly that edge.
+    const v1 = await putText(1, `see ![a](/api/files/${fileA.id})`, 0);
+    await delay(400);
+    assert.deepEqual(
+      readRefs(1),
+      [fileA.id],
+      'junction must record the reference written at runtime'
+    );
+
+    // Removing the reference must drop the edge, not accumulate it.
+    await putText(1, 'no references anymore', v1);
+    await delay(400);
+    assert.deepEqual(readRefs(1), [], 'junction must drop removed references');
+
+    // A second pad referencing B (a file attached to pad 1) adds a cross-pad
+    // edge; deleting the referencing pad must drop it via the pad_frd trigger.
+    const pad2 = await fetchJson(server.baseUrl, '/api/pads', {
+      method: 'POST',
+      headers: { Origin: server.baseUrl },
+    });
+    assert.equal(pad2.response.status, 200);
+    pad2Id = pad2.body.id;
+    await putText(pad2Id, `linked: /api/files/${fileB.id}`, 0);
+    await delay(400);
+    assert.deepEqual(
+      readRefs(pad2Id),
+      [fileB.id],
+      'cross-pad reference must land in the junction'
+    );
+    const del = await fetchJson(server.baseUrl, `/api/pads/${pad2Id}`, {
+      method: 'DELETE',
+      headers: { 'x-admin-token': 'admin123', Origin: server.baseUrl },
+    });
+    assert.equal(del.response.status, 200, JSON.stringify(del.body));
+    assert.deepEqual(
+      readRefs(pad2Id),
+      [],
+      'deleted pad must leave no reference edges behind (pad_frd trigger)'
+    );
+  } finally {
+    void fileA;
+    void fileB;
+    await stopServer(server);
+  }
+});
+
+test('TTL sweep protects files referenced by runtime-written text across restart', async () => {
+  const Database = require('better-sqlite3');
+  const server = await startServer({ FTS_SYNC_DEBOUNCE_MS: '100' });
+  const dataDir = server.dataDir;
+  let fileA;
+  let fileB;
+  let server2 = null;
+  try {
+    const upload = async (name, content) => {
+      const formData = new FormData();
+      formData.append('padId', '1');
+      formData.append('file', new Blob([content], { type: 'text/plain' }), name);
+      const res = await fetchJson(server.baseUrl, '/api/upload', { method: 'POST', body: formData });
+      assert.equal(res.response.status, 200);
+      return res.body;
+    };
+    fileA = await upload('restart-referenced.txt', 'a\n');
+    fileB = await upload('restart-orphan.txt', 'b\n');
+
+    const putRes = await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: `keep ![a](/api/files/${fileA.id})`, baseVersion: 0 }),
+    });
+    assert.equal(putRes.response.status, 200);
+
+    // Graceful stop so the shutdown flush lands. The junction is derived, so
+    // even a hard kill would be healed by the boot rebuild — this asserts the
+    // whole chain end to end.
+    await new Promise((resolve) => {
+      if (server.child.exitCode !== null) return resolve();
+      const killer = setTimeout(() => server.child.kill('SIGKILL'), 1000);
+      server.child.once('exit', () => {
+        clearTimeout(killer);
+        resolve();
+      });
+      server.child.kill('SIGINT');
+    });
+
+    const db = new Database(path.join(dataDir, 'store.db'));
+    const veryOld = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    db.prepare('UPDATE files SET created_at = ? WHERE id = ?').run(veryOld, fileA.id);
+    db.prepare('UPDATE files SET created_at = ? WHERE id = ?').run(veryOld, fileB.id);
+    db.close();
+
+    server2 = await startServer({ DATA_DIR: dataDir }, { bootstrap: false });
+    const state = await fetchJson(server2.baseUrl, '/api/state');
+    const ids = (state.body.files || []).map((f) => f.id);
+    assert.ok(ids.includes(fileA.id), 'file referenced by runtime-written text must survive');
+    assert.ok(!ids.includes(fileB.id), 'unreferenced expired file must be collected');
+  } finally {
+    if (server2) await stopServer(server2);
+    else fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CSP connect-src is restricted to self (no wildcard ws:/wss:)', async () => {
+  const server = await startServer();
+  try {
+    const res = await fetch(`${server.baseUrl}/`);
+    assert.equal(res.status, 200);
+    const csp = res.headers.get('content-security-policy') || '';
+    const directive = (name) =>
+      csp
+        .split(';')
+        .map((d) => d.trim())
+        .find((d) => d.startsWith(name));
+    assert.equal(
+      directive('connect-src'),
+      "connect-src 'self'",
+      'same-origin ws/wss is covered by self; a bare ws: admits sockets to any host'
+    );
+    assert.equal(
+      directive('script-src'),
+      "script-src 'self'",
+      'all scripts are self-hosted; no CDN may remain in the allow list'
+    );
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('frontend vendor assets are self-hosted (no CDN scripts)', async () => {
+  const server = await startServer();
+  try {
+    const page = await fetch(`${server.baseUrl}/`);
+    const html = await page.text();
+    assert.ok(!html.includes('cdn.jsdelivr.net'), 'no CDN script tags may remain in the page');
+    for (const asset of [
+      'diff_match_patch.js',
+      'hotkeys.min.js',
+      'alloy_finger.js',
+      'marked.min.js',
+      'purify.min.js',
+    ]) {
+      const res = await fetch(`${server.baseUrl}/vendor/${asset}`);
+      assert.equal(res.status, 200, `vendor asset ${asset} must be served locally`);
+    }
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test('WS patch base uses the latest committed body after an HTTP write', async () => {
+  const server = await startServer();
+  try {
+    const a = await createReadyClient(server.wsUrl, 1);
+    a.drain();
+
+    // HTTP full-text write commits v1; the patch path must diff against that
+    // body, not a stale pre-write copy (regression guard for the per-pad body
+    // cache in db/pads.ts).
+    const put = await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'alpha beta', baseVersion: 0 }),
+    });
+    assert.equal(put.response.status, 200);
+    assert.equal(put.body.textVersion, 1);
+
+    const patchText = makePatch('alpha beta', 'alpha beta gamma');
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: patchText, baseVersion: 1 }));
+    const ack = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
+    assert.equal(ack.textVersion, 2);
+    const text = await fetchJson(server.baseUrl, '/api/pads/1');
+    assert.equal(text.body.text, 'alpha beta gamma');
+
+    // And back the other way: an HTTP overwrite must invalidate whatever the
+    // patch path last cached, or the next patch would apply against a ghost.
+    const put2 = await fetchJson(server.baseUrl, '/api/pads/1/text', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'fresh start', baseVersion: 2 }),
+    });
+    assert.equal(put2.response.status, 200);
+    assert.equal(put2.body.textVersion, 3);
+
+    const patchText2 = makePatch('fresh start', 'fresh start end');
+    a.socket.send(JSON.stringify({ type: 'patch', padId: 1, data: patchText2, baseVersion: 3 }));
+    const ack2 = await waitForMessage(a, (msg) => msg.type === 'patch-ack', 1500);
+    assert.equal(ack2.textVersion, 4);
+    const text2 = await fetchJson(server.baseUrl, '/api/pads/1');
+    assert.equal(text2.body.text, 'fresh start end');
+  } finally {
+    await stopServer(server);
+  }
+});

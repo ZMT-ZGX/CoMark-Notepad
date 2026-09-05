@@ -98,9 +98,9 @@ docker compose up -d --build
 
 | 项 | 说明 | 状态 |
 |----|------|------|
-| 公开 Pad 文件删除权限收紧 | 反转 v1.1.2：非 admin 只能删自己上传的文件（`src/services/fileService.ts` deleteFile/clearFiles） | 待办 |
-| 备份恢复演练 | 已有 `scripts/backup.sh`，需挂 cron + 异地拷贝 + 验证一次恢复 | 待办 |
-| 公开 Pad #1 收纳 | 旧库若仍有公开 Pad #1，迁移或删除 | 待办 |
+| 公开 Pad 文件删除权限收紧 | 反转 v1.1.2：非 admin 只能删自己上传的文件（`src/services/fileService.ts` deleteFile/clearFiles） | ✅ 已完成（v1.2.3 S8） |
+| 备份恢复演练 | 已有 `scripts/backup.sh`，需挂 cron + 异地拷贝 + 验证一次恢复 | 待办（运维事项，无代码改动） |
+| 公开 Pad #1 收纳 | 旧库若仍有公开 Pad #1，迁移或删除 | ✅ 已完成（2026-09-06：生产模式启动检测到无主公开 Pad 即告警并列出 id，处置——admin API 删除或设口令锁定——由运营者决定；不做静默迁移） |
 
 ## 5. 后续（阶段 1-2，见竞品分析报告）
 

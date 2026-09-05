@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS revoked_tokens (
   expires_at INTEGER NOT NULL
 );
 
+-- Junction of "pad body references file" edges, derived from pads.text and
+-- maintained by padFileRefs.ts on the debounced text flush. Lets the TTL
+-- sweep answer "is this file referenced?" with an indexed lookup instead of
+-- a per-candidate instr() scan over every pad body.
+CREATE TABLE IF NOT EXISTS pad_file_refs (
+  pad_id INTEGER NOT NULL,
+  file_id TEXT NOT NULL,
+  PRIMARY KEY (pad_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pad_file_refs_file
+  ON pad_file_refs(file_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS pad_search USING fts5(
   id UNINDEXED,
   title,
@@ -94,6 +106,12 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS pad_ad AFTER DELETE ON pads BEGIN
   DELETE FROM pad_search WHERE id = OLD.id;
+END;
+
+-- Same lifecycle as the FTS rows: a deleted pad leaves no reference edges
+-- behind, so files it was the last referent of become TTL-collectable.
+CREATE TRIGGER IF NOT EXISTS pad_frd AFTER DELETE ON pads BEGIN
+  DELETE FROM pad_file_refs WHERE pad_id = OLD.id;
 END;
 `;
 
@@ -132,6 +150,9 @@ function open(): any {
   // later additions are applied here. Idempotent — safe on every boot.
   ensureColumn('users', 'display_name', 'TEXT');
   reconcileSearchIndex();
+  // Lazy require: padFileRefs requires this module back for getDb(), so a
+  // top-level require would be a load-order cycle. Bounded by MAX_PADS.
+  require('./padFileRefs').rebuildAll();
   logger.info(`SQLite opened: ${SQLITE_FILE}`);
 
   // Migrate from store.json if SQLite is empty and JSON exists
@@ -145,7 +166,8 @@ function open(): any {
  * never drift from the bodies: the throttled sync defers refreshes, and a
  * crash between a body write and its refresh would otherwise leave stale
  * search results until the pad is edited again. Pads are capped at MAX_PADS,
- * so the rebuild is bounded and cheap.
+ * so the rebuild is bounded and cheap. The file-reference junction is rebuilt
+ * right after it (see open()) and lives by the same contract.
  */
 function reconcileSearchIndex(): void {
   const padCount = db.prepare('SELECT COUNT(*) AS cnt FROM pads').get().cnt;
@@ -319,6 +341,28 @@ function getDb(): any {
   return db;
 }
 
+// Statement cache: db.prepare() recompiles SQL on every call, which is pure
+// overhead for statements that run per keystroke or per request. Prepare once
+// per SQL text per database handle and reuse — the same pattern as the search
+// snippet statements in db/pads.ts. Call it lazily inside functions, never at
+// module top level: getDb() is null until open().
+let prepared: { db: any; bySql: Map<string, any> } | null = null;
+
+function prepareCached(sql: string): any {
+  if (!db) {
+    throw new Error('SQLite database not initialized');
+  }
+  if (!prepared || prepared.db !== db) {
+    prepared = { db, bySql: new Map() };
+  }
+  let stmt = prepared.bySql.get(sql);
+  if (!stmt) {
+    stmt = db.prepare(sql);
+    prepared.bySql.set(sql, stmt);
+  }
+  return stmt;
+}
+
 /**
  * Load all data from SQLite into a plain object (for backward-compat getStore()).
  */
@@ -390,6 +434,7 @@ module.exports = {
   open,
   close,
   getDb,
+  prepareCached,
   getStoreSnapshot,
   rowToUser,
 };

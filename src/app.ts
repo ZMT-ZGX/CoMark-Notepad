@@ -27,9 +27,13 @@ function createApp(
         directives: {
           defaultSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
-          scriptSrc: ["'self'", 'https://cdn.jsdelivr.net'],
+          // All scripts are self-hosted under /vendor — no CDN in the allow
+          // list means a compromised CDN cannot inject script into the page.
+          scriptSrc: ["'self'"],
           imgSrc: ["'self'", 'data:', 'blob:'],
-          connectSrc: ["'self'", 'ws:', 'wss:'],
+          // 'self' already covers same-origin ws/wss (the only sockets the
+          // client opens); a bare ws:/wss: would admit sockets to ANY host.
+          connectSrc: ["'self'"],
           baseUri: ["'self'"],
           fontSrc: ["'self'", 'https:', 'data:'],
           formAction: ["'self'"],

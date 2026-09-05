@@ -281,7 +281,11 @@ class PadService {
     excludeWsId: string | null,
     baseVersion: number | null = null
   ) {
-    const pad = this.store.findPadById(padId);
+    // The version check needs only the meta columns — dragging the full body
+    // out of SQLite just to compare one integer made every full-text save pay
+    // for 100KB it never read. The conflict path is the exception: the client
+    // merges against the authoritative body, so it fetches the full pad then.
+    const pad = this.store.findPadMetaById(padId);
     if (!pad) throw NotFoundError('Pad not found');
     if (!this.canAccessPad(userId, pad)) throw ForbiddenError('Access denied');
     // Pad lock is enforced by requirePadUnlock on the HTTP routes that call this.
@@ -296,7 +300,8 @@ class PadService {
     // overwrite of the whole pad. An undeclared write is treated as a
     // conflict so the client takes its existing resync-and-merge path.
     if (baseVersion == null || pad.textVersion !== baseVersion) {
-      return { ok: false, conflict: true, pad };
+      const full = this.store.findPadById(padId);
+      return { ok: false, conflict: true, pad: full || pad };
     }
 
     const updated = this.store.updatePadText(padId, text);

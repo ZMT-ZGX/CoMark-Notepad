@@ -79,6 +79,11 @@ async function start() {
   async function cleanupExpiredFiles() {
     const ttlMs = FILE_TTL_HOURS * 3600000;
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) return;
+    // Drain the debounced derived-index flush first: the reference junction
+    // rides the same flush as the search index, and the sweep must never act
+    // on edges that trail a just-written body (a reference added within the
+    // debounce window still protects its file).
+    db.pads.flushSearchSyncNow();
     const expired = db.files.removeExpired(ttlMs);
     if (expired.length === 0) return;
     await Promise.all(
@@ -195,6 +200,26 @@ async function start() {
     if (isProduction) {
       for (const warning of productionConfigWarnings()) {
         logger.warn(warning);
+      }
+      // Legacy public pads: fresh installs start with zero pads, but a
+      // database from before that change can still carry the always-seeded
+      // Pad #1 (owner_user_id=NULL) — readable AND writable-file-manageable
+      // by every registered user on a public deployment. Deletion is the
+      // operator's call (their content), so surface it instead of migrating
+      // silently.
+      const publicPads = db.pads
+        .findAllMeta()
+        .filter(
+          (p: { ownerUserId: string | null; creatorCode: string | null }) =>
+            !p.ownerUserId && !p.creatorCode
+        );
+      if (publicPads.length > 0) {
+        logger.warn(
+          { padIds: publicPads.map((p: { id: number }) => p.id) },
+          'Public pad(s) detected (no owner): on a public deployment every registered user ' +
+            'can read them and manage unowned uploads. Delete them via the admin API, or ' +
+            'set a pad password to lock them, if this is not intended.'
+        );
       }
     }
 

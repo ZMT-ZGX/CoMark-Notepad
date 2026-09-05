@@ -23,8 +23,9 @@ function rowToGrant(row: any): WriteGrant {
 }
 
 function findByUser(code: string): WriteGrant | undefined {
-  const db = sqlite.getDb();
-  const row = db.prepare('SELECT * FROM write_grants WHERE user_code = ?').get(code);
+  // Runs on every accepted write in gated mode (per keystroke) — keep it
+  // compiled once.
+  const row = sqlite.prepareCached('SELECT * FROM write_grants WHERE user_code = ?').get(code);
   return row ? rowToGrant(row) : undefined;
 }
 
@@ -72,12 +73,9 @@ function remove(code: string): boolean {
  * Called on every accepted write, so keep it to one UPDATE.
  */
 function touch(code: string, expiresAt: number | null): void {
-  const db = sqlite.getDb();
-  db.prepare('UPDATE write_grants SET last_used_at = ?, expires_at = ? WHERE user_code = ?').run(
-    Date.now(),
-    expiresAt,
-    code
-  );
+  sqlite
+    .prepareCached('UPDATE write_grants SET last_used_at = ?, expires_at = ? WHERE user_code = ?')
+    .run(Date.now(), expiresAt, code);
 }
 
 module.exports = {

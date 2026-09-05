@@ -5,8 +5,9 @@ const sqlite = require('./sqlite');
 import type { FileInfo } from '../types';
 
 function findById(id: string): FileInfo | undefined {
-  const db = sqlite.getDb();
-  const row = db.prepare('SELECT * FROM files WHERE id = ?').get(id);
+  // Runs on every file access check (download / delete / convert / list
+  // gating) — keep it compiled once.
+  const row = sqlite.prepareCached('SELECT * FROM files WHERE id = ?').get(id);
   return row ? rowToFile(row) : undefined;
 }
 
@@ -63,13 +64,18 @@ function removeMany(ids: string[]): void {
 // permanently broken image or link behind — the attachment outlives the TTL
 // as long as some pad still uses it.
 //
-// The needle is the bare `files/<id>` substring (the documented AGENTS.md
-// contract). A narrower `)`/`/` continuation needle would MISS references
-// that end in `>`, `"`, whitespace or end-of-text and delete those files as
-// broken links. The trade-off of the bare needle: a shorter id
-// substring-matches inside a reference to a longer one (`files/abc1` inside
-// `files/abc123`), which errs in the safe direction — the file is kept
-// longer than strictly needed, never deleted while referenced.
+// The reference check reads the pad_file_refs junction (pad_id ↔ file_id),
+// maintained by padFileRefs.ts on the debounced text flush and rebuilt at
+// boot — the same derived-index contract as the search index. It replaced a
+// per-expired-candidate `instr()` scan over every pad body, which blocked
+// the event loop for seconds per hourly sweep once bodies and files
+// accumulated. Callers must drain the pending flush first (server.ts does)
+// so the junction always reflects the current bodies.
+//
+// The needle contract is unchanged: the bare `files/<id>` substring, which
+// errs in the safe direction — a file is kept longer than strictly needed,
+// never deleted while referenced (see padFileRefs.ts for the exact
+// extraction semantics).
 function findExpired(ttlMs: number): FileInfo[] {
   const db = sqlite.getDb();
   const cutoff = Date.now() - ttlMs;
@@ -77,10 +83,7 @@ function findExpired(ttlMs: number): FileInfo[] {
     .prepare(
       `SELECT * FROM files
        WHERE created_at < ?
-         AND NOT EXISTS (
-           SELECT 1 FROM pads p
-           WHERE instr(p.text, 'files/' || files.id) > 0
-         )`
+         AND id NOT IN (SELECT file_id FROM pad_file_refs)`
     )
     .all(cutoff)
     .map(rowToFile);

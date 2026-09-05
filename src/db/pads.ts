@@ -3,13 +3,29 @@
 const sqlite = require('./sqlite');
 const { FTS_SYNC_DEBOUNCE_MS } = require('../config');
 const logger = require('../utils/logger');
+const padFileRefs = require('./padFileRefs');
 
 import type { Pad } from '../types';
 
+// ── Per-pad body cache ────────────────────────────────────────────────
+// The WS patch path re-reads the full body from SQLite on every keystroke
+// purely to have a patch base — but that base necessarily equals the body the
+// previous updateText() wrote. Keep the latest body of each pad in memory and
+// invalidate on every write; pads are capped at MAX_PADS, so the cache is
+// bounded (≈ MAX_PADS × body size). The row is the source of truth and the
+// cache is transparent to a SIGKILL: a fresh process rebuilds it from SQLite
+// on first read. Callers always receive a shallow copy, never the cached
+// object itself (the text string is shared — strings are immutable).
+const bodyCache = new Map<number, Pad>();
+
 function findById(id: number): Pad | undefined {
-  const db = sqlite.getDb();
-  const row = db.prepare('SELECT * FROM pads WHERE id = ?').get(id);
-  return row ? rowToPad(row) : undefined;
+  const hit = bodyCache.get(id);
+  if (hit) return { ...hit };
+  const row = sqlite.prepareCached('SELECT * FROM pads WHERE id = ?').get(id);
+  if (!row) return undefined;
+  const pad = rowToPad(row);
+  bodyCache.set(id, pad);
+  return { ...pad };
 }
 
 function findAll(): Pad[] {
@@ -26,19 +42,19 @@ function findAll(): Pad[] {
 const META_COLUMNS = 'id, password, created_at, owner_user_id, creator_code, text_version';
 
 function findByIdMeta(id: number): Pad | undefined {
-  const db = sqlite.getDb();
-  const row = db.prepare(`SELECT ${META_COLUMNS} FROM pads WHERE id = ?`).get(id);
+  const row = sqlite.prepareCached(`SELECT ${META_COLUMNS} FROM pads WHERE id = ?`).get(id);
   return row ? rowToPadMeta(row) : undefined;
 }
 
 function findAllMeta(): Pad[] {
-  const db = sqlite.getDb();
-  return db.prepare(`SELECT ${META_COLUMNS} FROM pads ORDER BY id`).all().map(rowToPadMeta);
+  return sqlite
+    .prepareCached(`SELECT ${META_COLUMNS} FROM pads ORDER BY id`)
+    .all()
+    .map(rowToPadMeta);
 }
 
 function count(): number {
-  const db = sqlite.getDb();
-  return db.prepare('SELECT COUNT(*) AS cnt FROM pads').get().cnt;
+  return sqlite.prepareCached('SELECT COUNT(*) AS cnt FROM pads').get().cnt;
 }
 
 function create(
@@ -57,29 +73,34 @@ function create(
 }
 
 function updateText(id: number, text: string): Pad | null {
-  const db = sqlite.getDb();
   // RETURNING reads back only the scalar columns. The caller already knows the
   // body it just wrote, so re-selecting the whole row would drag up to 100KB
   // back out of SQLite on every keystroke purely to learn the new version.
-  const row = db
-    .prepare(
+  const row = sqlite
+    .prepareCached(
       `UPDATE pads SET text = ?, text_version = text_version + 1 WHERE id = ?
        RETURNING ${META_COLUMNS}`
     )
     .get(text, id);
   if (!row) return null;
   scheduleSearchSync(id, text);
-  return { ...rowToPadMeta(row), text, textVersion: row.text_version };
+  const updated = { ...rowToPadMeta(row), text, textVersion: row.text_version };
+  // The cache entry is a separate object: a caller holding `updated` must not
+  // be able to mutate what findById() hands out later.
+  bodyCache.set(id, { ...updated });
+  return updated;
 }
 
-// ── Throttled FTS sync ────────────────────────────────────────────────
+// ── Throttled derived-index sync (FTS + file references) ─────────────
 // The pads row is written synchronously on every edit (durability is
 // unchanged), but refreshing the trigram index used to ride along via an
 // UPDATE trigger — one full re-tokenize of the whole body per keystroke. The
 // refresh is now deferred per pad: the first edit schedules a sync, further
 // edits inside the window only overwrite the pending body, and one UPDATE
 // runs when the window closes. A crash before the flush is repaired by the
-// boot-time reconcileSearchIndex().
+// boot-time reconcileSearchIndex(). The pad_file_refs junction rides the
+// same flush (padFileRefs.refresh) so the TTL sweep reads edges that match
+// the current bodies.
 
 const SEARCH_SYNC_DEBOUNCE_MS = FTS_SYNC_DEBOUNCE_MS;
 
@@ -108,19 +129,24 @@ function flushSearchSync(): void {
 }
 
 /**
- * Apply the deferred FTS refreshes with the timer-surviving guarantee above.
- * Any SQLite error is swallowed and retried once on the next tick (covers the
- * transient cases — SQLITE_BUSY under a concurrent writer, a WAL checkpoint);
- * a second failure drops the entries rather than retrying forever. Nothing
- * here is unrecoverable: reconcileSearchIndex() rebuilds the whole FTS index
- * from the bodies at boot, and any pad edited again schedules a fresh sync.
+ * Apply the deferred FTS + reference refreshes with the timer-surviving
+ * guarantee above. Any SQLite error is swallowed and retried once on the
+ * next tick (covers the transient cases — SQLITE_BUSY under a concurrent
+ * writer, a WAL checkpoint); a second failure drops the entries rather than
+ * retrying forever. Nothing here is unrecoverable: reconcileSearchIndex()
+ * rebuilds both derived indexes from the bodies at boot, and any pad edited
+ * again schedules a fresh sync.
  */
 function writeSearchEntries(entries: [number, string][], attempt: number): void {
   try {
     const db = sqlite.getDb();
     const update = db.prepare('UPDATE pad_search SET content = ? WHERE id = ?');
     const batch = db.transaction((rows: [number, string][]) => {
-      for (const [id, text] of rows) update.run(text, id);
+      const refLengths = padFileRefs.fileIdLengths(db);
+      for (const [id, text] of rows) {
+        update.run(text, id);
+        padFileRefs.refresh(id, text, refLengths);
+      }
     });
     batch(entries);
   } catch (err) {
@@ -134,15 +160,16 @@ function writeSearchEntries(entries: [number, string][], attempt: number): void 
     }
     logger.error(
       { err, pads: entries.length },
-      'FTS refresh failed after retry; index rebuilt at next boot'
+      'Derived-index refresh failed after retry; rebuilt at next boot'
     );
   }
 }
 
 /**
- * Synchronously flush any pending FTS refreshes ("now", as opposed to the
- * debounced flush). Called on graceful shutdown so a search started right
- * after a restart never misses recent edits.
+ * Synchronously flush any pending derived-index refreshes ("now", as opposed
+ * to the debounced flush). Called on graceful shutdown so a search started
+ * right after a restart never misses recent edits, and by the file TTL sweep
+ * so it never acts on reference edges that trail a just-written body.
  */
 function flushSearchSyncNow(): void {
   if (searchSyncTimer) {
@@ -153,15 +180,19 @@ function flushSearchSyncNow(): void {
 }
 
 function updatePassword(id: number, passwordHash: string | null): Pad | null {
-  const db = sqlite.getDb();
-  const result = db.prepare('UPDATE pads SET password = ? WHERE id = ?').run(passwordHash, id);
+  const result = sqlite
+    .prepareCached('UPDATE pads SET password = ? WHERE id = ?')
+    .run(passwordHash, id);
   if (result.changes === 0) return null;
+  // The cached body carries the old password hash — drop it so findById
+  // re-reads the row instead of answering from the stale entry.
+  bodyCache.delete(id);
   return findById(id) || null;
 }
 
 function remove(id: number): void {
-  const db = sqlite.getDb();
-  db.prepare('DELETE FROM pads WHERE id = ?').run(id);
+  bodyCache.delete(id);
+  sqlite.prepareCached('DELETE FROM pads WHERE id = ?').run(id);
 }
 
 /**

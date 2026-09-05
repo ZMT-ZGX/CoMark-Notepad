@@ -9,8 +9,8 @@ function init(): void {
 }
 
 function exists(code: string): boolean {
-  const db = sqlite.getDb();
-  const row = db.prepare('SELECT 1 FROM users WHERE code = ?').get(code);
+  // Runs in the auth middleware on every request — keep it compiled once.
+  const row = sqlite.prepareCached('SELECT 1 FROM users WHERE code = ?').get(code);
   return !!row;
 }
 
@@ -25,8 +25,7 @@ function create(user: User): User {
 }
 
 function findByCode(code: string): User | undefined {
-  const db = sqlite.getDb();
-  const row = db.prepare('SELECT * FROM users WHERE code = ?').get(code);
+  const row = sqlite.prepareCached('SELECT * FROM users WHERE code = ?').get(code);
   return row ? sqlite.rowToUser(row) : undefined;
 }
 
