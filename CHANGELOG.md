@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### 修复
+
+- **CI Node 18 测试腿失败** — `npm test` 使用的 `node --import tsx` 中 `--import` 是 Node 20.6+ 专属 flag，Node 18 上直接报 bad option 导致整个测试 job 失败（20/22 不受影响）。移除该 flag：测试文件与 harness 本就是纯 JS，被测服务由 harness 显式经 tsx CLI 启动，不依赖该 flag。修复后 116/116 通过，声明支持的 Node `>=18` 恢复名实相符。
+
 ## [1.3.0] - 2026-09-06
 
 ### UI 视觉重构 + 断线/远端编辑交互完善
