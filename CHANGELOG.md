@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file. Versions follow
 
 ### 修复
 
-- **CI Node 18 测试腿失败** — `npm test` 使用的 `node --import tsx` 中 `--import` 是 Node 20.6+ 专属 flag，Node 18 上直接报 bad option 导致整个测试 job 失败（20/22 不受影响）。移除该 flag：测试文件与 harness 本就是纯 JS，被测服务由 harness 显式经 tsx CLI 启动，不依赖该 flag。修复后 116/116 通过，声明支持的 Node `>=18` 恢复名实相符。
+- **CI 测试矩阵 Node 18 腿失败 → 支持地板提升到 Node 20.16+** — 两层原因叠加：① `npm test` 的 `node --import tsx` 中 `--import` 是 Node 20.6+ 专属 flag（已移除，测试文件与 harness 均为纯 JS，被测服务由 harness 显式经 tsx CLI 启动）；② 移除后本机以官方 Node 18.20.8 复现仍失败 19 例，全部为 `pdf-parse@2.4.5` 模块加载即 `DOMMatrix is not defined`——该依赖**官方声明 `engines: node >=20.16.0 <21 || >=22.3.0`**，捆绑的 pdfjs 仅在新版 Node 注入浏览器全局。上游明确不支持 18，不做脆弱的 polyfill 硬扛。处置：`engines` 收紧为 `>=20.16.0`，CI 矩阵 `[18, 20, 22]` → `[20, 22]`，README badge 同步；与 Docker 镜像 `node:20-alpine`（20.19）一致。Node 18 属 EOL（2025-04），此为声明与现实对齐而非能力回退。
 
 ## [1.3.0] - 2026-09-06
 

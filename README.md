@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/ZMT-ZGX/CoMark-Notepad/actions/workflows/ci.yml/badge.svg)](https://github.com/ZMT-ZGX/CoMark-Notepad/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](package.json)
+[![Node](https://img.shields.io/badge/node-%3E%3D20.16-brightgreen)](package.json)
 [![Release](https://img.shields.io/github/v/tag/ZMT-ZGX/CoMark-Notepad)](https://github.com/ZMT-ZGX/CoMark-Notepad/tags)
 
 局域网实时协作记事本 + 文件共享 + 文件转 Markdown。一台电脑启动服务，同 WiFi 下的设备打开浏览器即可实时同步文字和文件，无需注册、无需云端。

@@ -12,7 +12,7 @@
     "lan"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20.16.0"
   },
   "scripts": {
     "start": "node dist/server.js",
