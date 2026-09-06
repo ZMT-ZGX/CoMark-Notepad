@@ -1,6 +1,6 @@
 {
   "name": "comark-notepad",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "LAN real-time collaborative notepad with file sharing",
   "main": "dist/server.js",
   "license": "MIT",

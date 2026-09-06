@@ -2,23 +2,23 @@
 
 All notable changes to this project are documented in this file. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.5] - 2026-09-06
 
-### 公网上线阻断项清欠：e2e 修复 + 备份恢复演练（2026-09-06）
-
-> 部署计划 S9 与 PRR 评估的两项上线阻断项全部落地。结论：CI e2e 门禁恢复绿色，备份/恢复闭环经过实际演练，公网部署的工程前提齐备。
-
-1. **e2e 套件修复（17/17，修复 CI 红灯）** — 两个叠加的根因：
-   - **真实用户 bug：零 Pad 安装永远显示离线** — Pad #1 播种移除后，全新实例没有任何 Pad，客户端 `connectWS()` 以默认 `padId=1` 连接，服务端按访问控制语义 `4404 Pad not found` 关闭（`src/ws/index.ts`），状态停留在「重连中」。修复：`app.js` init 仅当当前 Pad 存在于 Pad 列表时才连接，零 Pad 时刻意保持离线——`switchPad()` 在第一个 Pad 创建的瞬间即建立连接（该函数本就调用 `connectWS()`），同步能力无缺口，消除的只是误导性的离线状态与 4404 toast。
-   - **e2e 滞后于已发布 UI** — `basic.spec` 断言旧版英文文案（`chars`/`line`），字数统计 v1.2.0 已重做为「N 字 · N 行」；断言更新为当前格式。`global-setup` 适配零 Pad 拓扑：镜像真实首用流程（自动注册 → 建 Pad → 重载 → 在线），此前它期望零 Pad 服务器直接在线，Pad #1 弃用后必然超时（预存失败，与代码改动无关，已用 stash 基线实验证明）。
-2. **备份恢复演练 + `scripts/restore.sh`** — S9「备份恢复演练」落地：完整执行备份 → 清空数据卷 → 恢复 → 启动验证（活体快照，服务器运行中取）。验证 4 项全过：快照事务一致性（快照后的写入未泄漏进恢复结果）、附件字节与库内 `files.size` 精确一致、FTS 启动自动重建、健康探针 200。新增 `scripts/restore.sh`（与 `backup.sh` 对称：停机 → 恢复库 → 清理 `-wal/-shm` → 恢复 files → 重启），DEPLOYMENT.md §5 补演练记录。演练中发现并规避的坑已写进脚本注释：快照先落在数据卷 `data/backups/`，**必须先拷出宿主机再对卷做破坏性操作**。cron 定时与异地拷贝属运营侧配置，不在脚本范围。
-
-## [1.2.4] - 2026-09-06
+> 公网上线前的最后一轮清欠。为了什么：PRR 评估给出的两项上线阻断项——CI 主分支因 e2e 失败而常红（失去发布门禁与信任信号）、备份/恢复从未验证过（公网即真实用户数据，恢复没演练过等于没有备份）——全部清零；过程中顺带修掉一个 Pad #1 弃用遗留的真实用户 bug，并补上法律上一直缺失的开源授权文件。公网部署的工程前提至此齐备。
 
 ### 开源合规：MIT 许可证落地
 
-1. **`LICENSE` 文件（MIT 全文）** — 此前 README 写 "MIT"、`package.json.license` 也是 "MIT"，但仓库内无许可证文件，法律上不构成有效授权（开源成熟度对标中的 P0 硬阻断）。补入标准 MIT 全文，版权行 `Copyright (c) 2026 ZMT-ZGX`。
-2. **README License 章节升级 + 顶部 badge** — License 章节改为链接到 LICENSE 文件并标注版权人；顶部新增 CI / License / Node >=18 / Release（GitHub tag）四个真实状态 badge。
+1. **`LICENSE` 文件（MIT 全文）** — 为了什么：此前 README 写 "MIT"、`package.json.license` 也是 "MIT"，但仓库内无许可证文件，法律上不构成有效授权（开源成熟度对标的 P0 硬阻断，任何评估自托管方案的团队第一眼看的就是它）。补入标准 MIT 全文，版权行 `Copyright (c) 2026 ZMT-ZGX`。
+2. **README License 章节升级 + 顶部 badge** — License 章节改为链接到 LICENSE 文件并标注版权人；顶部新增 CI / License / Node >=18 / Release（GitHub tag）四个真实状态 badge，仓库列表页获得信任信号。
+
+### 公网上线阻断项清欠：e2e 修复 + 备份恢复演练
+
+1. **e2e 套件修复（17/17，修复 CI 红灯）** — 两个叠加的根因：
+   - **真实用户 bug：零 Pad 安装永远显示离线** — 为了什么：Pad #1 播种移除后，全新实例没有任何 Pad，客户端 `connectWS()` 以默认 `padId=1` 连接，服务端按访问控制语义 `4404 Pad not found` 关闭（`src/ws/index.ts`），状态停留在「重连中」——每个新装用户开局即见假离线。修复：`app.js` init 仅当当前 Pad 存在于 Pad 列表时才连接，零 Pad 时刻意保持离线——`switchPad()` 在第一个 Pad 创建的瞬间即建立连接（该函数本就调用 `connectWS()`），同步能力无缺口，消除的只是误导性的离线状态与 4404 toast。
+   - **e2e 滞后于已发布 UI** — `basic.spec` 断言旧版英文文案（`chars`/`line`），字数统计 v1.2.0 已重做为「N 字 · N 行」；断言更新为当前格式。`global-setup` 适配零 Pad 拓扑：镜像真实首用流程（自动注册 → 建 Pad → 重载 → 在线），此前它期望零 Pad 服务器直接在线，Pad #1 弃用后必然超时（预存失败，与代码改动无关，已用 stash 基线实验证明）。
+2. **备份恢复演练 + `scripts/restore.sh`** — 为了什么：S9「备份恢复演练」——公网部署意味着真实用户数据，`backup.sh` 存在但恢复从未被验证，等于没有备份。完整执行备份 → 清空数据卷 → 恢复 → 启动验证（活体快照，服务器运行中取）。验证 4 项全过：快照事务一致性（快照后的写入未泄漏进恢复结果）、附件字节与库内 `files.size` 精确一致、FTS 启动自动重建、健康探针 200。新增 `scripts/restore.sh`（与 `backup.sh` 对称：停机 → 恢复库 → 清理 `-wal/-shm` → 恢复 files → 重启），DEPLOYMENT.md §5 补演练记录。演练中发现并规避的坑已写进脚本注释：快照先落在数据卷 `data/backups/`，**必须先拷出宿主机再对卷做破坏性操作**。cron 定时与异地拷贝属运营侧配置，不在脚本范围。
+
+## [1.2.4] - 2026-09-06
 
 ### 热路径收尾 + 前端资产自托管（2026-09-06）
 
