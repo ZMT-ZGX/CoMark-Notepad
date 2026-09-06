@@ -11,6 +11,8 @@ import { switchPad } from './pads.js';
 const SEARCH_DEBOUNCE_MS = 300;
 
 let debounceTimer = null;
+let searchAbort = null;
+let lastQuery = '';
 
 export function initSearch() {
   const btn = $('#search-btn');
@@ -67,14 +69,19 @@ function closeSearch() {
 
 async function runSearch(q) {
   const resultsEl = $('#search-results');
+  lastQuery = q;
+  if (searchAbort) searchAbort.abort();
+  searchAbort = new AbortController();
   try {
     const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
       headers: padAuthHeaders(),
+      signal: searchAbort.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    renderResults(data.results || []);
+    renderResults(data.results || [], q);
   } catch (e) {
+    if (e && e.name === 'AbortError') return;
     resultsEl.innerHTML = '<div class="search-empty">Search failed</div>';
   }
 }
@@ -94,7 +101,7 @@ function snippetToSafeHtml(snippet) {
     .join('</mark>');
 }
 
-function renderResults(results) {
+function renderResults(results, q) {
   const el = $('#search-results');
   if (results.length === 0) {
     el.innerHTML = '<div class="search-empty">No matches</div>';
@@ -103,21 +110,31 @@ function renderResults(results) {
   el.innerHTML = results
     .map(
       (r) => `
-    <div class="search-result" data-pad-id="${r.id}">
+    <button type="button" class="search-result" data-pad-id="${r.id}">
       <div class="search-result-id">Pad #${r.id}</div>
       <div class="search-result-snippet">${snippetToSafeHtml(r.snippet) || escapeHtml((r.content || '').slice(0, 120))}</div>
-    </div>`
+    </button>`
     )
     .join('');
 
   el.querySelectorAll('.search-result').forEach((node) => {
-    node.addEventListener('click', () => {
+    node.addEventListener('click', async () => {
       const padId = Number(node.dataset.padId);
-      if (padId) {
-        switchPad(padId);
-        closeSearch();
-      }
+      if (!padId) return;
+      await switchPad(padId);
+      closeSearch();
+      highlightMatch(q || lastQuery);
     });
   });
+}
+
+function highlightMatch(q) {
+  if (!q) return;
+  const ta = $('#text-input');
+  if (!ta) return;
+  const idx = ta.value.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) return;
+  ta.focus();
+  try { ta.setSelectionRange(idx, idx + q.length); } catch {}
 }
 

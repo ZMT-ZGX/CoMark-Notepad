@@ -6,6 +6,7 @@
  */
 
 import { state, $, padAuthHeaders, escapeHtml } from './core.js';
+import { openModal, closeModal } from './modal-manager.js';
 
 export async function openMarkdownPreview(file) {
   const modal = $('#preview-modal');
@@ -17,7 +18,7 @@ export async function openMarkdownPreview(file) {
   bodyEl.className = 'preview-body is-loading';
   bodyEl.textContent = 'Loading...';
   if (tocEl) tocEl.innerHTML = '';
-  modal.hidden = false;
+  openModal(modal);
 
   try {
     // Header only — never put padToken in the URL (access / proxy logs).
@@ -87,8 +88,13 @@ function buildToc(bodyEl, tocEl) {
 export function closeMarkdownPreview() {
   const modal = $('#preview-modal');
   if (!modal || modal.hidden) return;
-  modal.hidden = true;
+  closeModal(modal);
   $('#preview-body').innerHTML = '';
   const tocEl = document.getElementById('preview-toc');
   if (tocEl) tocEl.innerHTML = '';
+}
+
+export function initPreview() {
+  const closeBtn = $('#preview-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeMarkdownPreview);
 }

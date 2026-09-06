@@ -10,46 +10,14 @@ import { createPad, switchPad } from './pads.js';
 import { showPasswordModal } from './modals.js';
 import { toggleInviteModal } from './invitation.js';
 import { sendTextNow } from './text-sync.js';
+import { closeAllModals } from './modal-manager.js';
+import { exportMarkdown } from './export.js';
 
 /* global hotkeys */
 
 /**
  * @typedef {typeof hotkeys} HotkeysFn
  */
-
-/**
- * Close every open modal and the markdown preview.
- */
-function closeAllModals() {
-  $('#password-modal').hidden = true;
-  $('#unlock-modal').hidden = true;
-  $('#confirm-modal').hidden = true;
-  const inviteModal = $('#invite-modal');
-  if (inviteModal) inviteModal.hidden = true;
-  const uploadModal = $('#upload-confirm-modal');
-  if (uploadModal) uploadModal.hidden = true;
-  const previewModal = $('#preview-modal');
-  if (previewModal) previewModal.hidden = true;
-  $('#preview-body').innerHTML = '';
-}
-
-/**
- * Export current pad text as a Markdown file.
- */
-function exportMarkdown() {
-  const text = $('#text-input').value;
-  if (!text.trim()) {
-    showToast('Nothing to export');
-    return;
-  }
-  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `pad-${state.currentPadId}.md`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  showToast('Exported!');
-}
 
 /**
  * Focus the textarea and place cursor at the end.
@@ -67,6 +35,7 @@ function toggleFileSearch() {
   const bar = $('#file-search-bar');
   if (!bar) return;
   bar.hidden = !bar.hidden;
+  bar.dataset.manualOpen = bar.hidden ? '0' : '1';
   if (!bar.hidden) {
     const input = $('#file-search');
     if (input) input.focus();
@@ -113,7 +82,7 @@ export function initShortcuts(hotkeysFn) {
       state.sendTimeout = null;
     }
     sendTextNow();
-    showToast('Saved');
+    showToast('Saved', 'success');
   });
 
   // Ctrl/Cmd + E  →  Export as Markdown

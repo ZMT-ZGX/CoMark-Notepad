@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>CoMark-Notepad</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>">
-  <link rel="stylesheet" href="style.css?v=17">
+  <link rel="stylesheet" href="style.css?v=19">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
 </head>
@@ -62,6 +62,7 @@
       <textarea id="text-input" data-testid="editor" placeholder="Start typing..." spellcheck="false"></textarea>
       <div class="notepad-footer">
         <span id="text-stats" class="text-stats">0 字 · 1 行</span>
+        <span id="remote-hint" class="remote-hint" hidden>有新内容 <button id="remote-hint-apply" type="button" class="remote-hint-apply">应用</button></span>
         <button id="export-btn" class="export-btn" title="Export as Markdown">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Export
@@ -231,7 +232,7 @@
     </div>
   </div>
 
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <!-- Markdown Preview Modal -->
   <div id="preview-modal" class="modal-overlay" hidden>
@@ -249,7 +250,10 @@
     </div>
   </div>
 
-  <div id="offline-banner" class="offline-banner" hidden>网络已断开，正在本地保存...</div>
+  <div id="offline-banner" class="offline-banner" hidden>
+    <span id="offline-banner-text">网络已断开，正在本地保存...</span>
+    <button id="reconnect-now" type="button" class="reconnect-now" hidden>立即重连</button>
+  </div>
   <div id="write-access-banner" class="write-access-banner" hidden>
     只读模式 · <button id="write-access-open-btn" class="write-access-link">输入口令解锁编辑</button>
   </div>
@@ -269,6 +273,6 @@
   <script src="vendor/alloy_finger.js"></script>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
-  <script type="module" src="app.js?v=19"></script>
+  <script type="module" src="app.js?v=20"></script>
 </body>
 </html>

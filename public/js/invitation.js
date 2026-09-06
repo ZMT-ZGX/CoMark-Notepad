@@ -1,6 +1,7 @@
 import { state, $, showToast } from './core.js';
 import { createInvitation, redeemInvitation } from './server.js';
 import { refreshPads } from './pads.js';
+import { openModal, closeModal, withPending } from './modal-manager.js';
 
 async function generateInvitation() {
   try {
@@ -18,12 +19,11 @@ function showInviteTokenModal(token) {
   const tokenDisplay = modal.querySelector('.invite-token-display');
   if (tokenDisplay) tokenDisplay.textContent = token;
   if (tokenBox) tokenBox.hidden = false;
-  modal.hidden = false;
+  openModal(modal);
 }
 
 function hideInviteModal() {
-  const modal = $('#invite-modal');
-  if (modal) modal.hidden = true;
+  closeModal('invite-modal');
 }
 
 function copyInviteToken() {
@@ -60,14 +60,15 @@ async function redeemInvite() {
 
 export function toggleInviteModal() {
   const modal = $('#invite-modal');
-  modal.hidden = !modal.hidden;
   $('#redeem-error').hidden = true;
+  if (modal.hidden) openModal(modal);
+  else hideInviteModal();
 }
 
 export function initInvitation() {
   $('#invite-btn').addEventListener('click', toggleInviteModal);
-  $('#generate-invite-btn').addEventListener('click', generateInvitation);
+  $('#generate-invite-btn').addEventListener('click', (e) => withPending(e.currentTarget, generateInvitation));
   $('#copy-invite-btn').addEventListener('click', copyInviteToken);
   $('#close-invite-btn').addEventListener('click', hideInviteModal);
-  $('#redeem-invite-btn').addEventListener('click', redeemInvite);
+  $('#redeem-invite-btn').addEventListener('click', (e) => withPending(e.currentTarget, redeemInvite));
 }

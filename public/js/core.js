@@ -54,6 +54,17 @@ export function getPadSync(padId) {
   return state.padSync[padId];
 }
 
+// Drop every trace of a deleted pad: sync state, in-memory queue, and the
+// persisted offline queue. Without this, deleting a pad leaked its shadow and
+// localStorage entry forever.
+export function dropPadState(padId) {
+  delete state.padSync[padId];
+  delete state.volatilePatchQueue[padId];
+  const at = padSyncOrder.indexOf(padId);
+  if (at !== -1) padSyncOrder.splice(at, 1);
+  try { localStorage.removeItem(state.patchQueueKey(padId)); } catch {}
+}
+
 export const state = {
   ws: null,
   wsId: null,
@@ -147,9 +158,11 @@ export function escapeHtml(text) {
   return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
-export function showToast(msg) {
+export function showToast(msg, type = 'info') {
   const toast = $('#toast');
   toast.textContent = msg;
+  toast.classList.remove('error', 'success', 'shortcuts');
+  if (type === 'error' || type === 'success') toast.classList.add(type);
   toast.classList.add('show');
   clearTimeout(state.toastTimer);
   state.toastTimer = setTimeout(() => toast.classList.remove('show'), 2500);

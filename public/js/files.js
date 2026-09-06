@@ -4,6 +4,7 @@ import {
 } from './core.js';
 import { deleteFileApi, convertFileApi, uploadWithProgress } from './server.js';
 import { refreshPads } from './pads.js';
+import { openModal, closeModal } from './modal-manager.js';
 
 // --- Text Stats (Memos / SiYuan style) ---
 
@@ -151,13 +152,21 @@ function createFileElement(file) {
   }
 
   el.querySelector('.delete').addEventListener('click', async () => {
-    try {
-      await deleteFileApi(file.id, file.padId);
-      removeLocalFile(file.id);
-      removeFileFromList(file.id);
-    } catch (e) {
-      showToast(e.message);
-    }
+    const { showConfirmModal } = await import('./modals.js');
+    showConfirmModal(
+      'Delete file?',
+      `Permanently delete “${file.originalName}”?`,
+      'Delete',
+      async () => {
+        try {
+          await deleteFileApi(file.id, file.padId);
+          removeLocalFile(file.id);
+          removeFileFromList(file.id);
+        } catch (e) {
+          showToast(e.message, 'error');
+        }
+      }
+    );
   });
 
   return el;
@@ -205,7 +214,9 @@ export function updateFilesEmpty() {
   empty.hidden = list.children.length > 0;
   const searchBar = $('#file-search-bar');
   const totalFiles = list.children.length;
-  searchBar.hidden = totalFiles < 4;
+  if (searchBar.dataset.manualOpen !== '1') {
+    searchBar.hidden = totalFiles < 4;
+  }
 }
 
 // --- File Search ---
@@ -372,16 +383,16 @@ function showUploadConfirm(files) {
     list.appendChild(item);
   }
 
-  modal.hidden = false;
+  openModal(modal);
 
   $('#upload-confirm-cancel').onclick = () => {
-    modal.hidden = true;
+    closeModal(modal);
     const queue = files.map((file) => ({ file, shouldConvert: false }));
     processUploadQueue(queue);
   };
 
   $('#upload-confirm-ok').onclick = () => {
-    modal.hidden = true;
+    closeModal(modal);
     const queue = files.map((file) => ({
       file,
       shouldConvert: isConvertible(file.name) && file.size <= state.convertCapabilities.maxBytes,
@@ -389,6 +400,8 @@ function showUploadConfirm(files) {
     processUploadQueue(queue);
   };
 }
+
+let failedUploads = [];
 
 async function processUploadQueue(queue) {
   const CONCURRENCY = 3;
@@ -398,6 +411,9 @@ async function processUploadQueue(queue) {
   progress.hidden = false;
   progressFill.style.width = '0%';
   progressText.textContent = `Uploading 0/${queue.length}...`;
+  failedUploads = [];
+  const retryBtn = progress.querySelector('.upload-retry-btn');
+  if (retryBtn) retryBtn.remove();
 
   let completed = 0;
   let idx = 0;
@@ -405,11 +421,12 @@ async function processUploadQueue(queue) {
     while (idx < queue.length) {
       const i = idx++;
       const { file, shouldConvert } = queue[i];
-      await uploadFile(file, shouldConvert, (filePercent) => {
+      const ok = await uploadFile(file, shouldConvert, (filePercent) => {
         const overall = Math.round(((completed + filePercent / 100) / queue.length) * 100);
         progressFill.style.width = `${overall}%`;
         progressText.textContent = `Uploading ${completed}/${queue.length}...`;
       });
+      if (!ok) failedUploads.push({ file, shouldConvert });
       completed++;
       progressFill.style.width = `${Math.round((completed / queue.length) * 100)}%`;
       progressText.textContent = completed < queue.length
@@ -418,13 +435,26 @@ async function processUploadQueue(queue) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () => worker()));
+  if (failedUploads.length > 0) {
+    progressText.textContent = `${failedUploads.length} 个失败`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'upload-retry-btn';
+    btn.textContent = '重试';
+    btn.addEventListener('click', () => {
+      const retry = failedUploads.slice();
+      processUploadQueue(retry);
+    });
+    progress.appendChild(btn);
+    return;
+  }
   setTimeout(() => { progress.hidden = true; }, 500);
 }
 
 async function uploadFile(file, shouldConvert = false, onProgress) {
   if (file.size > MAX_FILE_SIZE) {
-    showToast(`Skipped: ${file.name} (too large)`);
-    return;
+    showToast(`Skipped: ${file.name} (too large)`, 'error');
+    return false;
   }
 
   const padId = state.currentPadId;
@@ -440,7 +470,7 @@ async function uploadFile(file, shouldConvert = false, onProgress) {
     upsertLocalFile(uploadedFile);
     addFileToList(uploadedFile, true);
     updateFilesEmpty();
-    showToast(`Uploaded: ${file.name}`);
+    showToast(`Uploaded: ${file.name}`, 'success');
 
     if (shouldConvert && isConvertible(uploadedFile.originalName) && uploadedFile.size <= state.convertCapabilities.maxBytes) {
       const convertBtn = document.querySelector(`#files-list [data-id="${uploadedFile.id}"] .convert`);
@@ -472,7 +502,9 @@ async function uploadFile(file, shouldConvert = false, onProgress) {
       }
     }
   } catch (e) {
-    showToast(e.message);
+    showToast(e.message, 'error');
+    return false;
   }
+  return true;
 }
 

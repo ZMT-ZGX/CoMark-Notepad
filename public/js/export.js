@@ -12,19 +12,21 @@ const textarea = () => $('#text-input');
 // Leave headroom under that; larger pads already sync via WS / offline queue.
 const UNLOAD_BODY_MAX = 60_000;
 
+export function exportMarkdown() {
+  const text = textarea().value;
+  if (!text.trim()) { showToast('Nothing to export'); return; }
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const a = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = `pad-${state.currentPadId}.md`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('Exported!', 'success');
+}
+
 export function initExport() {
-  $('#export-btn').addEventListener('click', () => {
-    const text = textarea().value;
-    if (!text.trim()) { showToast('Nothing to export'); return; }
-    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
-    const a = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    a.href = url;
-    a.download = `pad-${state.currentPadId}.md`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('Exported!');
-  });
+  $('#export-btn').addEventListener('click', exportMarkdown);
 }
 
 export function initBeforeUnload() {

@@ -1,6 +1,6 @@
-import { state, $, showToast, getPadToken, setPadToken, findPad, getFilesForPad } from './core.js';
+import { state, $, showToast, getPadToken, setPadToken, findPad, getFilesForPad, dropPadState } from './core.js';
 import { fetchState, fetchPadContent, createPadApi, deletePadApi } from './server.js';
-import { renderFilesList } from './files.js';
+import { renderFilesList, updateTextStats } from './files.js';
 import { connectWS } from './ws.js';
 import { showUnlockModal, showConfirmModal } from './modals.js';
 
@@ -81,6 +81,7 @@ export async function switchPad(padId) {
 
   state.currentPadId = padId;
   $('#text-input').value = '';
+  updateTextStats();
 
   renderPadTabs();
   updateLockButton();
@@ -102,9 +103,9 @@ export async function createPad() {
     state.pads.push(newPad);
     renderPadTabs();
     await switchPad(data.id);
-    showToast(`Created pad ${data.id}`);
+    showToast(`Created pad ${data.id}`, 'success');
   } catch (e) {
-    showToast(e.message);
+    showToast(e.message, 'error');
   }
 }
 
@@ -119,7 +120,29 @@ export async function refreshPads() {
     updateLockButton();
   } catch (e) {
     console.warn('Failed to refresh pads:', e);
+    showPadsRetry();
   }
+}
+
+function showPadsRetry() {
+  const container = $('#pad-tabs');
+  if (!container || container.querySelector('.pad-retry-btn')) return;
+  const btn = document.createElement('button');
+  btn.className = 'pad-retry-btn';
+  btn.type = 'button';
+  btn.textContent = '加载失败，点击重试';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = '重试中…';
+    try {
+      await refreshPads();
+      await loadPadContent();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '加载失败，点击重试';
+    }
+  });
+  container.appendChild(btn);
 }
 
 export async function loadPadContent() {
@@ -144,6 +167,7 @@ export async function loadPadContent() {
     applyLoadedText(data.text || '', nextVersion, padId);
   } catch (e) {
     console.warn('Failed to load pad content:', e);
+    showToast('内容加载失败，请重试', 'error');
   }
 }
 
@@ -187,6 +211,7 @@ async function showDeletePadMenu(padId) {
       try {
         await deletePadApi(padId);
         setPadToken(padId, null);
+        dropPadState(padId);
         if (padId === state.currentPadId) {
           const nextPad = state.pads
             .filter(p => p.id !== padId)

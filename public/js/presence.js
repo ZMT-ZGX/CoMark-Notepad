@@ -133,6 +133,11 @@ export function resetPresence() {
   render();
 }
 
+export function refreshPresenceName() {
+  nameFetched = false;
+  sendPresence(true);
+}
+
 export function initPresence() {
   const ta = $('#text-input');
   if (ta) ta.addEventListener('input', noteLocalActivity);

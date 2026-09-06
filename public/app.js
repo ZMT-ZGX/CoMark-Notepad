@@ -6,13 +6,13 @@
  * websocket modules).
  */
 
-import { state } from './js/core.js';
+import { state, $ } from './js/core.js';
 import { initTheme } from './js/theme.js';
 import { loadPadContent, renderPadTabs, refreshPads, updateLockButton, initLockButton } from './js/pads.js';
 import { initFileSearch, initFileUpload, startTimeLabelUpdater, stopTimeLabelUpdater } from './js/files.js';
 import { initPasswordModal, initUnlockModal } from './js/modals.js';
 import { initInvitation } from './js/invitation.js';
-import { initIdentity, connectWS, loadConvertCapabilitiesUI } from './js/ws.js';
+import { initIdentity, connectWS, loadConvertCapabilitiesUI, reconnectNow } from './js/ws.js';
 import { initTextSync } from './js/text-sync.js';
 import { initQR } from './js/qr.js';
 import { initExport, initBeforeUnload } from './js/export.js';
@@ -21,6 +21,7 @@ import { initGestures, reinitGesturesOnResize } from './js/gestures.js';
 import { initSearch } from './js/search.js';
 import { initWriteAccess } from './js/write-access.js';
 import { initPresence } from './js/presence.js';
+import { initPreview } from './js/preview.js';
 
 // --- Mobile detection ---
 function updateMobileClass() {
@@ -76,6 +77,9 @@ async function init() {
   initSearch();
   initWriteAccess();
   initPresence();
+  initPreview();
+  const reconnectBtn = $('#reconnect-now');
+  if (reconnectBtn) reconnectBtn.addEventListener('click', reconnectNow);
 
   // Async: load capabilities + identity in parallel
   await Promise.all([loadConvertCapabilitiesUI(), initIdentity()]);

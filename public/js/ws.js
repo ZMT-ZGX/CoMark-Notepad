@@ -17,6 +17,44 @@ import { applyRemoteText, applyRemotePatch, applyPatchNack, applyTextState, flus
 import { handleWriteDenied } from './write-access.js';
 import { handlePresenceMessage, handlePresenceRequest, resetPresence } from './presence.js';
 
+let countdownInterval = null;
+let reconnectWasOffline = false;
+
+function stopReconnectCountdown() {
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+  const btn = $('#reconnect-now');
+  if (btn) btn.hidden = true;
+}
+
+function startReconnectCountdown(delayMs) {
+  showOfflineBanner();
+  reconnectWasOffline = true;
+  const btn = $('#reconnect-now');
+  const text = $('#offline-banner-text');
+  const deadline = Date.now() + delayMs;
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    if (text) text.textContent = `连接已断开，${left}s 后重连…`;
+    $('#status').title = `Disconnected — retrying in ${left}s`;
+  };
+  stopReconnectCountdown();
+  if (btn) btn.hidden = false;
+  tick();
+  countdownInterval = setInterval(tick, 1000);
+}
+
+export function reconnectNow() {
+  stopReconnectCountdown();
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+  connectWS();
+}
+
 // --- Identity (kept here because it touches state init + pads + ws) ---
 
 import { fetchMe, registerUser } from './server.js';
@@ -79,6 +117,14 @@ export function connectWS() {
     state.reconnectAttempts = 0;
     $('#status').className = 'status online';
     $('#status').title = 'Connected';
+    stopReconnectCountdown();
+    if (reconnectWasOffline) {
+      reconnectWasOffline = false;
+      hideOfflineBanner();
+      const bannerText = $('#offline-banner-text');
+      if (bannerText) bannerText.textContent = '网络已断开，正在本地保存...';
+      showToast('已恢复同步', 'success');
+    }
     // Do NOT flush the offline queue / load body here — wait for the server's
     // `hello` (which proves auth succeeded). Flushing before `hello` on a
     // locked pad with an invalid unlock token would leak the queue and then
@@ -161,14 +207,14 @@ export function connectWS() {
     $('#status').title = 'Disconnected - reconnecting...';
     $('#online-count').textContent = '0';
     state.wsId = null;
-    if (e.code === 4400) { showToast('Connection rejected by server'); return; }
+    if (e.code === 4400) { showToast('Connection rejected by server', 'error'); return; }
     if (e.code === 4403) {
       if (!$('#unlock-modal').hidden) return;
       showUnlockModal(state.currentPadId);
       return;
     }
-    if (e.code === 4401) { showToast('No access to this pad'); refreshPads(); return; }
-    if (e.code === 4404) { showToast('Pad not found'); refreshPads(); return; }
+    if (e.code === 4401) { showToast('No access to this pad', 'error'); refreshPads(); return; }
+    if (e.code === 4404) { showToast('Pad not found', 'error'); refreshPads(); return; }
     if (e.code === 4405) {
       // Write access required / expired — prompt for a passphrase, do not
       // auto-reconnect (the reconnect loop would just hit the same gate).
@@ -181,6 +227,7 @@ export function connectWS() {
     }
     const delay = Math.min(2000 * Math.pow(2, state.reconnectAttempts), 30000);
     state.reconnectAttempts++;
+    startReconnectCountdown(delay);
     state.reconnectTimer = setTimeout(connectWS, delay);
   };
 

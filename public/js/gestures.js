@@ -9,6 +9,7 @@
 
 import { state, $, showToast } from './core.js';
 import { switchPad } from './pads.js';
+import { closeAllModals, isModalOpen } from './modal-manager.js';
 
 /* global AlloyFinger */
 
@@ -33,27 +34,12 @@ function navigatePad(direction) {
   showToast(`Pad ${target.id}`);
 }
 
-/**
- * Close every open modal.
- */
-function closeAllModals() {
-  const ids = [
+function anyModalOpen() {
+  return [
     'password-modal', 'unlock-modal', 'confirm-modal',
     'invite-modal', 'upload-confirm-modal', 'preview-modal',
-  ];
-  let closed = false;
-  for (const id of ids) {
-    const el = $(`#${id}`);
-    if (el && !el.hidden) {
-      el.hidden = true;
-      closed = true;
-    }
-  }
-  if (closed) {
-    const body = $('#preview-body');
-    if (body) body.innerHTML = '';
-  }
-  return closed;
+    'write-access-modal', 'profile-modal', 'members-modal',
+  ].some((id) => isModalOpen(id));
 }
 
 let gestureInstance = null;
@@ -90,7 +76,15 @@ export function initGestures() {
   gestureInstance = new AlloyFinger(main, {
     swipe(evt) {
       // If a modal is open, any swipe should close it first.
-      if (closeAllModals()) return;
+      if (anyModalOpen()) {
+        closeAllModals();
+        return;
+      }
+
+      // Fast horizontal swipe inside the textarea is text selection / caret
+      // motion — never treat it as a pad switch.
+      const origin = evt.target || evt.srcEvent?.target;
+      if (origin && origin.closest && origin.closest('#text-input')) return;
 
       switch (evt.direction) {
         case 'Left':
@@ -100,7 +94,6 @@ export function initGestures() {
           navigatePad('right');
           break;
         case 'Down':
-          // Swipe-down on main area does nothing extra when no modal is open.
           break;
       }
     },

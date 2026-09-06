@@ -8,6 +8,7 @@
 // does not survive a browser restart — break-glass credentials should not
 // persist silently).
 import { state, $, showToast } from './core.js';
+import { openModal, closeModal, withPending } from './modal-manager.js';
 import {
   fetchWriteStatus,
   redeemPassphraseApi,
@@ -94,7 +95,7 @@ export async function refreshWriteStatus() {
 export function showPassphraseModal() {
   const m = $('#write-access-modal');
   if (!m) return;
-  m.hidden = false;
+  openModal(m);
   const input = $('#write-access-passphrase');
   const err = $('#write-access-error');
   if (err) err.hidden = true;
@@ -105,8 +106,7 @@ export function showPassphraseModal() {
 }
 
 function hidePassphraseModal() {
-  const m = $('#write-access-modal');
-  if (m) m.hidden = true;
+  closeModal('write-access-modal');
 }
 
 async function submitPassphrase() {
@@ -134,14 +134,21 @@ async function submitPassphrase() {
 // --- Release ---
 
 async function releaseAccess() {
-  if (!confirm('确定放弃当前写权限？')) return;
-  try {
-    await releaseWriteAccessApi();
-    await refreshWriteStatus();
-    showToast('已切换为只读');
-  } catch (e) {
-    showToast((e && e.message) || '释放写权限失败');
-  }
+  const { showConfirmModal } = await import('./modals.js');
+  showConfirmModal(
+    '放弃写权限？',
+    '确定放弃当前写权限？此 Pad 将变为只读。',
+    '放弃',
+    async () => {
+      try {
+        await releaseWriteAccessApi();
+        await refreshWriteStatus();
+        showToast('已切换为只读');
+      } catch (e) {
+        showToast((e && e.message) || '释放写权限失败', 'error');
+      }
+    }
+  );
 }
 
 // --- Profile (display name) modal ---
@@ -149,7 +156,7 @@ async function releaseAccess() {
 function showProfileModal() {
   const m = $('#profile-modal');
   if (!m) return;
-  m.hidden = false;
+  openModal(m);
   const input = $('#profile-name');
   const err = $('#profile-error');
   if (err) err.hidden = true;
@@ -163,8 +170,7 @@ function showProfileModal() {
 }
 
 function hideProfileModal() {
-  const m = $('#profile-modal');
-  if (m) m.hidden = true;
+  closeModal('profile-modal');
 }
 
 async function submitProfile() {
@@ -175,7 +181,9 @@ async function submitProfile() {
   try {
     await updateProfileApi(name || null);
     hideProfileModal();
-    showToast('已保存昵称');
+    showToast('已保存昵称', 'success');
+    const { refreshPresenceName } = await import('./presence.js');
+    refreshPresenceName();
   } catch (e) {
     if (err) {
       err.textContent = e.message;
@@ -189,7 +197,7 @@ async function submitProfile() {
 function showMembersModal() {
   const m = $('#members-modal');
   if (!m) return;
-  m.hidden = false;
+  openModal(m);
   const tokenInput = $('#members-admin-token');
   if (tokenInput) tokenInput.value = state.adminToken || '';
   renderMembersList();
@@ -197,8 +205,7 @@ function showMembersModal() {
 }
 
 function hideMembersModal() {
-  const m = $('#members-modal');
-  if (m) m.hidden = true;
+  closeModal('members-modal');
 }
 
 async function renderMembersList() {
@@ -262,16 +269,18 @@ async function onMemberAction(e) {
     return;
   }
   try {
-    if (action === 'trust') {
-      await grantMemberWriteApi(code, token);
-      showToast('已授予永久写权限');
-    } else {
-      await revokeMemberWriteApi(code, token);
-      showToast('已撤销写权限');
-    }
-    await renderMembersList();
+    await withPending(btn, async () => {
+      if (action === 'trust') {
+        await grantMemberWriteApi(code, token);
+        showToast('已授予永久写权限', 'success');
+      } else {
+        await revokeMemberWriteApi(code, token);
+        showToast('已撤销写权限');
+      }
+      await renderMembersList();
+    });
   } catch (err) {
-    showToast(err.message);
+    showToast(err.message, 'error');
   }
 }
 
@@ -290,7 +299,7 @@ export function initWriteAccess() {
   if (openBtn) openBtn.addEventListener('click', showPassphraseModal);
 
   const submitBtn = $('#write-access-submit');
-  if (submitBtn) submitBtn.addEventListener('click', submitPassphrase);
+  if (submitBtn) submitBtn.addEventListener('click', (e) => withPending(e.currentTarget, submitPassphrase));
   const phraseInput = $('#write-access-passphrase');
   if (phraseInput) {
     phraseInput.addEventListener('keydown', (e) => {
@@ -309,7 +318,7 @@ export function initWriteAccess() {
   const profileBtn = $('#profile-btn');
   if (profileBtn) profileBtn.addEventListener('click', showProfileModal);
   const profileSubmit = $('#profile-submit');
-  if (profileSubmit) profileSubmit.addEventListener('click', submitProfile);
+  if (profileSubmit) profileSubmit.addEventListener('click', (e) => withPending(e.currentTarget, submitProfile));
   const profileCancel = $('#profile-cancel');
   if (profileCancel) profileCancel.addEventListener('click', hideProfileModal);
 
@@ -318,7 +327,7 @@ export function initWriteAccess() {
   const membersClose = $('#members-close');
   if (membersClose) membersClose.addEventListener('click', hideMembersModal);
   const membersSaveToken = $('#members-save-token');
-  if (membersSaveToken) membersSaveToken.addEventListener('click', saveAdminToken);
+  if (membersSaveToken) membersSaveToken.addEventListener('click', (e) => withPending(e.currentTarget, saveAdminToken));
   const membersList = $('#members-list');
   if (membersList) membersList.addEventListener('click', onMemberAction);
 

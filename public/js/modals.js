@@ -2,6 +2,7 @@ import { state, $, showToast, getPadToken, setPadToken } from './core.js';
 import { setPadPassword, unlockPadApi } from './server.js';
 import { refreshPads, loadPadContent, updateLockButton, renderPadTabs } from './pads.js';
 import { connectWS } from './ws.js';
+import { openModal, closeModal, withPending } from './modal-manager.js';
 
 // --- Password Modal ---
 
@@ -40,18 +41,18 @@ export function showPasswordModal(mode) {
     confirmBtn.className = 'modal-btn confirm';
   }
 
-  modal.hidden = false;
+  openModal(modal);
   input.focus();
 }
 
 function hidePasswordModal() {
-  $('#password-modal').hidden = true;
+  closeModal('password-modal');
 }
 
 export function initPasswordModal() {
   $('#password-cancel').addEventListener('click', hidePasswordModal);
 
-  $('#password-confirm-btn').addEventListener('click', async () => {
+  $('#password-confirm-btn').addEventListener('click', (e) => withPending(e.currentTarget, async () => {
     const password = $('#password-input').value;
     const confirm = $('#password-confirm').value;
     const currentPassword = $('#password-current').value;
@@ -75,7 +76,7 @@ export function initPasswordModal() {
       error.textContent = e.message;
       error.hidden = false;
     }
-  });
+  }));
 }
 
 // --- Unlock Modal ---
@@ -87,19 +88,19 @@ export function showUnlockModal(padId) {
   unlockTargetPadId = padId;
   $('#unlock-error').hidden = true;
   $('#unlock-input').value = '';
-  $('#unlock-modal').hidden = false;
+  openModal('unlock-modal');
   $('#unlock-input').focus();
 }
 
 function hideUnlockModal() {
-  $('#unlock-modal').hidden = true;
+  closeModal('unlock-modal');
   unlockTargetPadId = null;
 }
 
 export function initUnlockModal() {
   $('#unlock-cancel').addEventListener('click', hideUnlockModal);
 
-  $('#unlock-confirm-btn').addEventListener('click', async () => {
+  $('#unlock-confirm-btn').addEventListener('click', (e) => withPending(e.currentTarget, async () => {
     if (!unlockTargetPadId) return;
     const password = $('#unlock-input').value;
     const error = $('#unlock-error');
@@ -122,7 +123,7 @@ export function initUnlockModal() {
       error.textContent = e.message;
       error.hidden = false;
     }
-  });
+  }));
 
   $('#unlock-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('#unlock-confirm-btn').click();
@@ -135,18 +136,18 @@ export function showConfirmModal(title, desc, okText, onConfirm) {
   $('#confirm-title').textContent = title;
   $('#confirm-desc').textContent = desc;
   $('#confirm-ok').textContent = okText;
-  $('#confirm-modal').hidden = false;
+  openModal('confirm-modal');
 
   const okBtn = $('#confirm-ok');
   const cancelBtn = $('#confirm-cancel');
 
   function cleanup() {
-    $('#confirm-modal').hidden = true;
+    closeModal('confirm-modal');
   }
 
   cancelBtn.onclick = cleanup;
-  okBtn.onclick = () => {
+  okBtn.onclick = () => withPending(okBtn, async () => {
     cleanup();
-    onConfirm();
-  };
+    await onConfirm();
+  });
 }

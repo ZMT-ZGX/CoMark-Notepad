@@ -341,6 +341,7 @@ async function httpFallback(padId, sync) {
       }
     } else {
       console.warn('Failed to sync text:', e);
+      enqueuePatch(padId, sync, targetText);
     }
   } finally {
     if (sync.inflight?.kind === 'http' && sync.inflight.requestToken === requestToken) {
@@ -421,6 +422,17 @@ function applyPendingRemoteText(padId = state.currentPadId) {
   sync.lastSyncedText = remoteText;
   if (hadLocal) sync.pendingTarget = merged;
   sync.pendingRemoteState = null;
+  hideRemoteHint();
+}
+
+function showRemoteHint() {
+  const hint = $('#remote-hint');
+  if (hint) hint.hidden = false;
+}
+
+function hideRemoteHint() {
+  const hint = $('#remote-hint');
+  if (hint) hint.hidden = true;
 }
 
 export function applyRemoteText(text, version, padId = state.currentPadId, force = false) {
@@ -428,10 +440,12 @@ export function applyRemoteText(text, version, padId = state.currentPadId, force
   if (version <= sync.textVersion) return;
   if (!force && document.activeElement === textarea()) {
     queueRemoteText(text, version, sync);
+    showRemoteHint();
     return;
   }
   if (composing && document.activeElement === textarea()) {
     queueRemoteText(text, version, sync, true);
+    showRemoteHint();
     return;
   }
   // Apply the remote body visually, but keep the shadow authoritative. Any
@@ -702,6 +716,10 @@ function handleBeforeUnload() {
 
 export function initTextSync() {
   const ta = textarea();
+  const applyHint = $('#remote-hint-apply');
+  if (applyHint) {
+    applyHint.addEventListener('click', () => applyPendingRemoteText());
+  }
   ta.addEventListener('input', () => { sendText(); scheduleTextStats(); });
   // Selection changes refresh the "选中 N 字" counter; debounced so dragging
   // a selection doesn't re-scan the whole document per pixel.
