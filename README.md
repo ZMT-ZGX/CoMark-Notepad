@@ -47,7 +47,7 @@
 
 | 层 | 选型 |
 |---|------|
-| 后端 | Node.js 18+ · Express 5 · TypeScript |
+| 后端 | Node.js 20.16+ · Express 5 · TypeScript |
 | 持久化 | better-sqlite3（WAL + busy_timeout）· FTS5 全文搜索 |
 | 实时通信 | ws（WebSocket）· diff-match-patch patch 协同 |
 | 文件上传 | Busboy multipart 流式 |

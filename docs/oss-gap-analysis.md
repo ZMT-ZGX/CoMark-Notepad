@@ -35,7 +35,7 @@
 | 被追踪文件数 | 97 |
 | 代码规模 | `src` 6045 行(TS) · `public/js` 3508 行 + `app.js` 89 行 · `tests` 4315 行 |
 | 测试 | `node --test` 95 例全过 · E2E 3 个 spec（basic / collaboration / password） |
-| CI | 4 job：lint(typecheck+eslint+prettier) / test(Node 18·20·22 + npm audit) / docker / e2e |
+| CI | 4 job：lint(typecheck+eslint+prettier) / test(Node 20·22 + npm audit) / docker / e2e |
 | 依赖 | 17 运行时 + 14 开发时 |
 | TS 配置 | `strict: true`，target ES2022 |
 
@@ -87,7 +87,7 @@
 | 性能基准 | **有 `bench` 脚本** | ❌ | ❌ | ❌ |
 | CI 专用脚本 | ❌ | **独立 `test:ci` / `test:e2e:ci`** | ❌ | 复用 `npm test` |
 | 架构拆分 | 单体 | monorepo（turbo） | **monorepo + 独立 `collab` 协作服务** | 单体单进程 |
-| `engines` | `node>=24.13.0, npm>=10` | 未声明 | 未声明 | `node>=18`（CI 实测 18/20/22） |
+| `engines` | `node>=24.13.0, npm>=10` | 未声明 | 未声明 | `node>=20.16.0`（CI 实测 20/22；18 因 pdf-parse 2.4.5 引擎要求移除） |
 
 **由此读出的改进空间**：
 - **前端单测缺位**是最确定的差距：SilverBullet / HedgeDoc 都有 vitest 覆盖前端纯逻辑；本项目 3508 行 `public/js`（含 739 行 `text-sync.js`）零单测。
@@ -267,7 +267,7 @@
 
 ## 8. 可维护性与扩展性 —— 规范意识强，机制化不足
 
-**优点**：`AGENTS.md` 是**质量极高**的约定文件（WS 关闭码语义、patch 协议不变量、健康检查 liveness/readiness 分离、容器 `mem_limit` 陷阱、IME 约束……），比多数同量级项目更严谨。CI 4 job 覆盖 lint/test/docker/e2e 且跨 Node 18/20/22——**这点是超过 HedgeDoc/Memos 之外的多数项目的**。
+**优点**：`AGENTS.md` 是**质量极高**的约定文件（WS 关闭码语义、patch 协议不变量、健康检查 liveness/readiness 分离、容器 `mem_limit` 陷阱、IME 约束……），比多数同量级项目更严谨。CI 4 job 覆盖 lint/test/docker/e2e 且跨 Node 20/22——**这点是超过 HedgeDoc/Memos 之外的多数项目的**。
 
 **机制化缺口**
 1. **规范只写在 `AGENTS.md`（面向 AI），没有面向人的 `CONTRIBUTING.md` / `STYLE.md`** → 外部贡献者无门。
@@ -434,7 +434,7 @@ diff-only 瘦身只覆盖了 `applyPatch` 的正常路径。**一旦客户端进
 2. **工程纪律超前**：liveness/readiness 分离、WS 关闭码语义化、patch 协议不变量、容器内存限制陷阱、IME 组合态约束——这些写在 `AGENTS.md` 里的约定，很多万星项目都没显式定义。
 3. **文件生命周期的引用保护**：TTL 只回收"未被正文引用"的附件，避免了竞品常见的"删附件留死链"问题。
 4. **写权限门控四层模型**（访客/持令写/信任成员/管理员）+ 信任成员白名单替代永久后门口令——安全性设计优于多数同类。
-5. **CI 覆盖 Node 18/20/22 三版本 + Docker 冒烟 + E2E**，比 HedgeDoc 之外的多数对标项目更完整。
+5. **CI 覆盖 Node 20/22 双版本 + Docker 冒烟 + E2E**，比 HedgeDoc 之外的多数对标项目更完整。
 
 ---
 
