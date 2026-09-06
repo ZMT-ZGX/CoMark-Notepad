@@ -4,9 +4,10 @@ test.describe('Basic functionality', () => {
   test('page loads and shows editor', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('[data-testid="editor"]')).toBeVisible();
-    // Text stats should contain "chars" and "line" regardless of content
-    await expect(page.locator('#text-stats')).toContainText('chars');
-    await expect(page.locator('#text-stats')).toContainText('line');
+    // Word count renders as "<字数> 字 · <行数> 行" (v1.2.0 rework: CJK chars
+    // + English words). Stats should contain both units regardless of content.
+    await expect(page.locator('#text-stats')).toContainText('字');
+    await expect(page.locator('#text-stats')).toContainText('行');
   });
 
   test('WebSocket connects', async ({ page }) => {
@@ -29,8 +30,9 @@ test.describe('Basic functionality', () => {
     await page.goto('/');
     const editor = page.locator('[data-testid="editor"]');
     await editor.fill('Hello World');
-    await expect(page.locator('#text-stats')).toContainText('11 chars');
-    await expect(page.locator('#text-stats')).toContainText('1 line');
+    // "Hello World" = 2 English words, 1 line (CJK chars + English words)
+    await expect(page.locator('#text-stats')).toContainText('2 字');
+    await expect(page.locator('#text-stats')).toContainText('1 行');
   });
 
   test('create new pad via [+] button', async ({ page }) => {

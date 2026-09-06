@@ -111,6 +111,15 @@ docker compose up -d --no-deps comark-notepad
 
 ### 恢复
 
+首选脚本（自动停机 → 恢复库与文件 → 清理 WAL → 重启）：
+
+```bash
+./scripts/restore.sh <时间戳>
+# BACKUP_DIR=/mnt/nas/notepad ./scripts/restore.sh 20260906-030000
+```
+
+手工等价操作：
+
 ```bash
 docker compose stop comark-notepad
 
@@ -129,6 +138,24 @@ docker compose start comark-notepad
 ```
 
 > 替换 `store.db` 后**必须删除 `-wal` / `-shm` 文件**，否则 SQLite 会用旧的 WAL 覆盖新数据。
+
+### 恢复演练记录（2026-09-06，v1.2.4）
+
+备份 → 清空 → 恢复 → 验证的完整闭环已实际执行一次（宿主机直跑同一机制：
+`scripts/sqlite-backup.js` 活体快照 + files 归档），验证项全部通过：
+
+1. **事务一致性** — 服务器运行中取快照；快照之后的写入（`POST-SNAPSHOT-WRITE`）没有出现在
+   恢复结果中，恢复到的正文停在快照时刻（v1）——backup API 快照是事务一致点。
+2. **文件完整** — 上传附件恢复后字节数与库内 `files.size` 记录精确一致。
+3. **FTS 可用** — 启动时 `reconcileSearchIndex()` 从恢复库自动重建索引，搜索立即可用。
+4. **健康探针** — 恢复实例 `/api/health/ready` 返回 200（pads/files 计数正确）。
+
+> 演练教训（已写进脚本）：快照先落在数据卷的 `data/backups/` 里，必须**拷出到宿主机备份目录**
+> 之后才敢对卷做任何破坏性操作——`backup.sh` 已含这一步，`restore.sh` 则要求备份目录独立于数据卷。
+
+公网上线前请照此在**自己的部署环境**重跑一次：备份一份 → 停机 → `./scripts/restore.sh` → 核对
+正文/文件/搜索 → 确认无误。cron 定时与异地拷贝（备份目录同步到另一台机器/对象存储）属运营侧配置，
+脚本不覆盖。
 
 ---
 

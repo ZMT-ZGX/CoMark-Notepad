@@ -80,10 +80,15 @@ async function init() {
   // Async: load capabilities + identity in parallel
   await Promise.all([loadConvertCapabilitiesUI(), initIdentity()]);
 
-  // Load pads, content, then connect WebSocket
+  // Load pads, content, then connect WebSocket. A fresh install has no pads
+  // (server-side Pad #1 seeding was removed): connecting would be closed with
+  // 4404 "Pad not found", so stay deliberately offline until a pad exists —
+  // switchPad() connects the moment the first one is created.
   await refreshPads();
   await loadPadContent();
-  connectWS();
+  if (state.pads.some((p) => p.id === state.currentPadId)) {
+    connectWS();
+  }
 }
 
 init();
