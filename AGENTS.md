@@ -175,6 +175,12 @@ See `.env.example`. Key vars:
 - `LOG_LEVEL` — pino level (default `info`)
 - `MAX_WS_CONNECTIONS` / `MAX_WS_CONNECTIONS_PER_IP` / `WS_PATCH_WINDOW_MS` / `MAX_WS_PATCHES_PER_WINDOW` — WebSocket limits (defaults 1000 / 10 / 60000 / 120)
 
+## Versioning & Releases
+
+- **Semver 三段**（`MAJOR.MINOR.PATCH`）——四段版本号（如 `1.2.4.1`）不是合法 semver，npm 工具链会拒绝。新增用户可见功能 → MINOR；纯修复 → PATCH；破坏性变更（协议收紧导致外部客户端必须改动的）→ MAJOR 并在 CHANGELOG 顶部显式标注行为变更。
+- **CHANGELOG 的每个版本必须有附注 tag** `vX.Y.Z`，指向该版本最后一个提交；发版提交格式统一为 `release: vX.Y.Z — 摘要`。发布 = CHANGELOG 节 + `package.json`/lockfile 版本号 + tag，三者缺一即未完成。
+- **版本号一经 tag 不复用、不重排**。历史遗留（有意保留，勿"修复"）：`1.2.1` / `1.2.2` 被跳号；`v1.0.1` / `v1.0.2` 无 tag——早期模块化重构以批量 "summary" 提交落地（2026-06-29），无法可靠定位发布点，不做猜测性回溯标注；`v1.1.0`–`v1.2.3` 的 tag 为 2026-09-06 按 CHANGELOG↔提交映射回溯补标。
+
 ## Definition of Done
 
 A change is complete when:
